@@ -21,6 +21,70 @@ if __name__ == "__main__":
 
 
 ================================================================================
+# 📄 api\app.py
+================================================================================
+
+# api/app.py
+
+from flask import Flask, jsonify
+from src.redis_client import r
+import json
+from typing import List, Optional
+
+app = Flask(__name__)
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "message": "API is running"})
+
+@app.route('/api/data/<string:ticker>', methods=['GET'])
+def get_data(ticker: str):
+    try:
+        # Fetch all keys matching the ticker pattern (e.g., BTC-USD:*:*)
+        keys = r.keys(f"{ticker}:*")  # type: ignore
+        keys: List[bytes] = keys
+        
+        if not keys:
+            return jsonify({"error": f"No data found for ticker {ticker}"}), 404
+        
+        # Initialize the response dictionary
+        result = {ticker: {}}
+        
+        # Process each key
+        for key in keys:
+            key_str = key.decode('utf-8')  # Convert bytes to string
+            # Split key into parts (e.g., BTC-USD:1m:36-78-27 -> [BTC-USD, 1m, 36-78-27])
+            _, interval, params = key_str.split(':')
+            # Fetch the MACD data for this key
+            data = r.get(key)  # type: ignore
+            data: Optional[bytes] = data
+            if data:
+                data_list = json.loads(data.decode('utf-8'))
+                if isinstance(data_list, list) and len(data_list) == 3:
+                    # Store all three candles under interval:param
+                    result[ticker][f"{interval}:{params}"] = [
+                        {
+                            "macd_line": item["macd_line"],
+                            "signal_line": item["signal_line"],
+                            "histogram": item["histogram"],
+                            "date": item["date"]
+                        }
+                        for item in data_list
+                    ]
+        
+        if not result[ticker]:
+            return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
+            
+        return jsonify(result)
+    
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
+
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0', port=5000)
+
+
+================================================================================
 # 📄 src\config.py
 ================================================================================
 
@@ -104,6 +168,7 @@ from src.data_fetcher import get_historical_data
 from src.indicator_calculator import add_macd
 from src.config import CRYPTO_TICKERS, MACD_PARAMS
 from src.redis_client import save_macd_to_redis
+import pandas as pd
 
 def main():
     print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
@@ -124,25 +189,34 @@ def main():
                 if df_macd.empty:
                     continue
 
-                last_row = {
-                    "macd_line": float(df_macd["macd_line"].iloc[-1]),
-                    "signal_line": float(df_macd["signal_line"].iloc[-1]),
-                    "histogram": float(df_macd["histogram"].iloc[-1]),
-                    "date": str(df_macd.index[-1].date())
-                }
+                # Get the last 3 rows of the DataFrame
+                last_three_rows = df_macd.tail(3)
+                if len(last_three_rows) < 3:
+                    print(f"[WARNING] Not enough data for {ticker} {params} (found {len(last_three_rows)} rows), skipping.")
+                    continue
+
+                # Convert the last 3 rows to a list of dictionaries
+                data_to_save = [
+                    {
+                        "macd_line": float(row.macd_line),
+                        "signal_line": float(row.signal_line),
+                        "histogram": float(row.histogram),
+                        "date": str(index.date())  # type: ignore
+                    }
+                    for index, row in last_three_rows.iterrows()
+                ]
 
                 save_macd_to_redis(
                     ticker,
                     interval,
                     {"fast": fast, "slow": slow, "signal": signal},
-                    last_row
+                    data_to_save  # Save the list of 3 dicts
                 )
 
     print("\n✅ [INFO] Full scan complete.\n")
 
 if __name__ == "__main__":
     main()
-
 
 
 ================================================================================
@@ -177,9 +251,11 @@ def add_macd(df, fast=12, slow=26, signal=9):
 # 📄 src\redis_client.py
 ================================================================================
 
+# src/redis_client.py
+
 import redis
 from redis import Redis
-from typing import Optional, cast
+from typing import Optional, cast, Union, List
 import os
 import json
 
@@ -189,7 +265,7 @@ REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
 r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
-def save_macd_to_redis(ticker: str, interval: str, params: dict, data: dict) -> None:
+def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
     key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
     try:
         r.set(key, json.dumps(data))
@@ -197,7 +273,7 @@ def save_macd_to_redis(ticker: str, interval: str, params: dict, data: dict) -> 
     except Exception as e:
         print(f"[REDIS ERROR] Failed to save {key}: {e}")
 
-def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[dict]:
+def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
     key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
     try:
         val = r.get(key)
@@ -208,5 +284,4 @@ def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[di
     except Exception as e:
         print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
         return None
-
 
