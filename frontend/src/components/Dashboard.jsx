@@ -1,18 +1,23 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 
+const API_URL = import.meta.env.VITE_API_URL;
+const API_KEY = import.meta.env.VITE_API_KEY;
+
 function Dashboard() {
   const [signals, setSignals] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // Replace with your actual public IP
-  const API_URL = 'http://34.83.108.47:5000/api/signals';
 
   useEffect(() => {
     const fetchSignals = async () => {
       try {
         setLoading(true);
-        const response = await axios.get(API_URL);
+        const response = await axios.get(API_URL, {
+          headers: {
+            'X-API-KEY': API_KEY,
+          },
+        });
+
         const signalsArray = Object.entries(response.data).map(([symbol, signal]) => ({
           symbol,
           signal,
@@ -27,7 +32,6 @@ function Dashboard() {
 
     fetchSignals();
     const interval = setInterval(fetchSignals, 15000);
-
     return () => clearInterval(interval);
   }, []);
 
