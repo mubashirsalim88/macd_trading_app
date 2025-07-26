@@ -21,13 +21,216 @@ if __name__ == "__main__":
 
 
 ================================================================================
-# 📄 api\app.py
+# 📄 src/data_fetcher.py
+================================================================================
+
+# data_fetcher.py
+
+import yfinance as yf
+import pandas as pd
+
+def get_historical_data(ticker, period='6mo', interval='1d'):
+    try:
+        df = yf.download(ticker, period=period, interval=interval)
+
+        if df is None or df.empty:
+            print(f"[Warning] No data returned for {ticker}.")
+            return pd.DataFrame()
+
+        return df
+
+    except Exception as e:
+        print(f"[Error] Failed to fetch data for {ticker}: {e}")
+        return pd.DataFrame()
+
+
+
+================================================================================
+# 📄 src/redis_client.py
+================================================================================
+
+# src/redis_client.py
+
+import redis
+from redis import Redis
+from typing import Optional, cast, Union, List
+import os
+import json
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
+
+r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+    try:
+        r.set(key, json.dumps(data))
+        print(f"[REDIS] Saved MACD for {key}")
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to save {key}: {e}")
+
+def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+    try:
+        val = r.get(key)
+        if val:
+            val = cast(bytes, val)
+            return json.loads(val.decode("utf-8"))
+        return None
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
+        return None
+
+
+================================================================================
+# 📄 src/config.py
+================================================================================
+
+# config.py
+
+CRYPTO_TICKERS = [
+    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
+    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
+    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
+    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
+    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
+    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
+    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
+    "FTM-USD"
+]
+
+MACD_PARAMS = {
+    '1m': [
+        (12, 26, 9),
+        (36, 78, 27),
+        (60, 130, 45),
+        (180, 390, 135),
+        (360, 780, 270),
+        (720, 1560, 540),
+        (2160, 4680, 1620)
+    ],
+    '5m': [
+        (12, 26, 9),
+        (36, 78, 27),
+        (72, 156, 54),
+        (144, 312, 108),
+        (432, 936, 324),
+        (900, 1950, 675),
+        (4500, 9750, 3375)
+    ],
+    '15m': [
+        (12, 26, 9),
+        (24, 52, 18),
+        (48, 104, 36),
+        (144, 312, 108),
+        (300, 650, 225),
+        (1500, 3250, 1125),
+        (3000, 6500, 2250)
+    ]
+}
+
+
+
+================================================================================
+# 📄 src/engine.py
+================================================================================
+
+# src/engine.py
+
+from src.data_fetcher import get_historical_data
+from src.indicator_calculator import add_macd
+from src.config import CRYPTO_TICKERS, MACD_PARAMS
+from src.redis_client import save_macd_to_redis
+import pandas as pd
+
+def main():
+    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
+
+    for ticker in CRYPTO_TICKERS:
+        for interval, param_list in MACD_PARAMS.items():
+            print(f"--- {ticker} @ {interval} ---")
+
+            df = get_historical_data(ticker, period="7d", interval=interval)
+            if df.empty:
+                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
+                continue
+
+            for params in param_list:
+                fast, slow, signal = params
+
+                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
+                if df_macd.empty:
+                    continue
+
+                # Get the last 3 rows of the DataFrame
+                last_three_rows = df_macd.tail(3)
+                if len(last_three_rows) < 3:
+                    print(f"[WARNING] Not enough data for {ticker} {params} (found {len(last_three_rows)} rows), skipping.")
+                    continue
+
+                # Convert the last 3 rows to a list of dictionaries
+                data_to_save = [
+                    {
+                        "macd_line": float(row.macd_line),
+                        "signal_line": float(row.signal_line),
+                        "histogram": float(row.histogram),
+                        "date": str(index.date())  # type: ignore
+                    }
+                    for index, row in last_three_rows.iterrows()
+                ]
+
+                save_macd_to_redis(
+                    ticker,
+                    interval,
+                    {"fast": fast, "slow": slow, "signal": signal},
+                    data_to_save  # Save the list of 3 dicts
+                )
+
+    print("\n✅ [INFO] Full scan complete.\n")
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+# 📄 src/indicator_calculator.py
+================================================================================
+
+# indicator_calculator.py
+
+import pandas as pd
+
+def add_macd(df, fast=12, slow=26, signal=9):
+    if 'Close' not in df.columns:
+        print("[Error] 'Close' column not found in DataFrame.")
+        return df
+
+    # Calculate EMAs
+    df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
+    df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
+
+    # MACD and Signal
+    df['macd_line'] = df['fast_ema'] - df['slow_ema']
+    df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
+
+    # Histogram
+    df['histogram'] = df['macd_line'] - df['signal_line']
+
+    return df
+
+
+
+================================================================================
+# 📄 api/app.py
 ================================================================================
 
 # api/app.py
 
 from flask import Flask, jsonify
 from src.redis_client import r
+from api.logic_evaluator import evaluate_all_tickers  # ✅ NEW IMPORT
 import json
 from typing import List, Optional
 
@@ -53,15 +256,12 @@ def get_data(ticker: str):
         # Process each key
         for key in keys:
             key_str = key.decode('utf-8')  # Convert bytes to string
-            # Split key into parts (e.g., BTC-USD:1m:36-78-27 -> [BTC-USD, 1m, 36-78-27])
             _, interval, params = key_str.split(':')
-            # Fetch the MACD data for this key
             data = r.get(key)  # type: ignore
             data: Optional[bytes] = data
             if data:
                 data_list = json.loads(data.decode('utf-8'))
                 if isinstance(data_list, list) and len(data_list) == 3:
-                    # Store all three candles under interval:param
                     result[ticker][f"{interval}:{params}"] = [
                         {
                             "macd_line": item["macd_line"],
@@ -80,12 +280,22 @@ def get_data(ticker: str):
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
+# ✅ NEW ENDPOINT FOR SIGNALS
+@app.route('/api/signals', methods=['GET'])
+def get_signals():
+    try:
+        signals = evaluate_all_tickers()
+        return jsonify(signals), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to evaluate signals: {str(e)}"}), 500
+
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
 
 
+
 ================================================================================
-# 📄 api\logic_evaluator.py
+# 📄 api/logic_evaluator.py
 ================================================================================
 
 from src.redis_client import get_macd_from_redis
@@ -192,206 +402,4 @@ def evaluate_all_tickers() -> Dict[str, str]:
 if __name__ == "__main__":
     signals = evaluate_all_tickers()
     print(signals)
-
-
-================================================================================
-# 📄 src\config.py
-================================================================================
-
-# config.py
-
-CRYPTO_TICKERS = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
-    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
-    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
-    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
-    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
-    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
-    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
-    "FTM-USD"
-]
-
-MACD_PARAMS = {
-    '1m': [
-        (12, 26, 9),
-        (36, 78, 27),
-        (60, 130, 45),
-        (180, 390, 135),
-        (360, 780, 270),
-        (720, 1560, 540),
-        (2160, 4680, 1620)
-    ],
-    '5m': [
-        (12, 26, 9),
-        (36, 78, 27),
-        (72, 156, 54),
-        (144, 312, 108),
-        (432, 936, 324),
-        (900, 1950, 675),
-        (4500, 9750, 3375)
-    ],
-    '15m': [
-        (12, 26, 9),
-        (24, 52, 18),
-        (48, 104, 36),
-        (144, 312, 108),
-        (300, 650, 225),
-        (1500, 3250, 1125),
-        (3000, 6500, 2250)
-    ]
-}
-
-
-
-================================================================================
-# 📄 src\data_fetcher.py
-================================================================================
-
-# data_fetcher.py
-
-import yfinance as yf
-import pandas as pd
-
-def get_historical_data(ticker, period='6mo', interval='1d'):
-    try:
-        df = yf.download(ticker, period=period, interval=interval)
-
-        if df is None or df.empty:
-            print(f"[Warning] No data returned for {ticker}.")
-            return pd.DataFrame()
-
-        return df
-
-    except Exception as e:
-        print(f"[Error] Failed to fetch data for {ticker}: {e}")
-        return pd.DataFrame()
-
-
-
-================================================================================
-# 📄 src\engine.py
-================================================================================
-
-# src/engine.py
-
-from src.data_fetcher import get_historical_data
-from src.indicator_calculator import add_macd
-from src.config import CRYPTO_TICKERS, MACD_PARAMS
-from src.redis_client import save_macd_to_redis
-import pandas as pd
-
-def main():
-    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
-
-    for ticker in CRYPTO_TICKERS:
-        for interval, param_list in MACD_PARAMS.items():
-            print(f"--- {ticker} @ {interval} ---")
-
-            df = get_historical_data(ticker, period="7d", interval=interval)
-            if df.empty:
-                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
-                continue
-
-            for params in param_list:
-                fast, slow, signal = params
-
-                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
-                if df_macd.empty:
-                    continue
-
-                # Get the last 3 rows of the DataFrame
-                last_three_rows = df_macd.tail(3)
-                if len(last_three_rows) < 3:
-                    print(f"[WARNING] Not enough data for {ticker} {params} (found {len(last_three_rows)} rows), skipping.")
-                    continue
-
-                # Convert the last 3 rows to a list of dictionaries
-                data_to_save = [
-                    {
-                        "macd_line": float(row.macd_line),
-                        "signal_line": float(row.signal_line),
-                        "histogram": float(row.histogram),
-                        "date": str(index.date())  # type: ignore
-                    }
-                    for index, row in last_three_rows.iterrows()
-                ]
-
-                save_macd_to_redis(
-                    ticker,
-                    interval,
-                    {"fast": fast, "slow": slow, "signal": signal},
-                    data_to_save  # Save the list of 3 dicts
-                )
-
-    print("\n✅ [INFO] Full scan complete.\n")
-
-if __name__ == "__main__":
-    main()
-
-
-================================================================================
-# 📄 src\indicator_calculator.py
-================================================================================
-
-# indicator_calculator.py
-
-import pandas as pd
-
-def add_macd(df, fast=12, slow=26, signal=9):
-    if 'Close' not in df.columns:
-        print("[Error] 'Close' column not found in DataFrame.")
-        return df
-
-    # Calculate EMAs
-    df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
-    df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
-
-    # MACD and Signal
-    df['macd_line'] = df['fast_ema'] - df['slow_ema']
-    df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
-
-    # Histogram
-    df['histogram'] = df['macd_line'] - df['signal_line']
-
-    return df
-
-
-
-================================================================================
-# 📄 src\redis_client.py
-================================================================================
-
-# src/redis_client.py
-
-import redis
-from redis import Redis
-from typing import Optional, cast, Union, List
-import os
-import json
-
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB = int(os.getenv("REDIS_DB", 0))
-
-r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
-
-def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
-    try:
-        r.set(key, json.dumps(data))
-        print(f"[REDIS] Saved MACD for {key}")
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to save {key}: {e}")
-
-def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
-    try:
-        val = r.get(key)
-        if val:
-            val = cast(bytes, val)
-            return json.loads(val.decode("utf-8"))
-        return None
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
-        return None
 

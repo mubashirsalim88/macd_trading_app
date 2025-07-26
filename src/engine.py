@@ -1,5 +1,3 @@
-# src/engine.py
-
 from src.data_fetcher import get_historical_data
 from src.indicator_calculator import add_macd
 from src.config import CRYPTO_TICKERS, MACD_PARAMS
@@ -34,10 +32,10 @@ def main():
                 # Convert the last 3 rows to a list of dictionaries
                 data_to_save = [
                     {
-                        "macd_line": float(row.macd_line),
-                        "signal_line": float(row.signal_line),
-                        "histogram": float(row.histogram),
-                        "date": str(index.date())  # type: ignore
+                        "macd_line": float(row.macd_line.iloc[0]),
+                        "signal_line": float(row.signal_line.iloc[0]),
+                        "histogram": float(row.histogram.iloc[0]),
+                        "date": str(index.date())
                     }
                     for index, row in last_three_rows.iterrows()
                 ]
@@ -46,7 +44,7 @@ def main():
                     ticker,
                     interval,
                     {"fast": fast, "slow": slow, "signal": signal},
-                    data_to_save  # Save the list of 3 dicts
+                    data_to_save
                 )
 
     print("\n✅ [INFO] Full scan complete.\n")
