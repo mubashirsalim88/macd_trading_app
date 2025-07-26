@@ -1,12 +1,14 @@
 # api/app.py
 
 from flask import Flask, jsonify
+from flask_cors import CORS
 from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers  # ✅ NEW IMPORT
+from api.logic_evaluator import evaluate_all_tickers
 import json
 from typing import List, Optional
 
 app = Flask(__name__)
+CORS(app)
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
