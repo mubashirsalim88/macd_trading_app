@@ -1,6 +1,6 @@
 import os
 
-EXCLUDED_DIRS = {'.venv', '__pycache__', '.git'}
+EXCLUDED_DIRS = {'.venv', '__pycache__', '.git', 'frontend'}
 EXCLUDED_FILES = {'dump_code.py', 'code_dump.txt'}
 OUTPUT_FILE = "dump/code_dump.txt"
 
