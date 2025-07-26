@@ -4,6 +4,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
 from api.logic_evaluator import evaluate_all_tickers
+from api.firestore_client import save_rule, get_all_rules
 import json
 import os
 from dotenv import load_dotenv
@@ -21,6 +22,26 @@ def require_api_key():
     if client_key != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
     return None
+
+@app.route('/api/rules', methods=['POST'])
+def create_rule():
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+    
+    rule_data = request.get_json()
+    if not rule_data or 'name' not in rule_data:
+        return jsonify({"error": "Invalid rule data"}), 400
+        
+    saved_rule = save_rule(rule_data)
+    return jsonify(saved_rule), 201
+
+@app.route('/api/rules', methods=['GET'])
+def list_rules():
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+
+    all_rules = get_all_rules()
+    return jsonify(all_rules), 200
 
 @app.route('/api/health', methods=['GET'])
 def health_check():

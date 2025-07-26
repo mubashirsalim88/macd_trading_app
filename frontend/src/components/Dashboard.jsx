@@ -1,8 +1,5 @@
 import { useState, useEffect } from 'react';
-import axios from 'axios';
-
-const API_URL = import.meta.env.VITE_API_URL;
-const API_KEY = import.meta.env.VITE_API_KEY;
+import { getSignals } from '../apiService';
 
 function Dashboard() {
   const [signals, setSignals] = useState([]);
@@ -11,13 +8,8 @@ function Dashboard() {
   useEffect(() => {
     const fetchSignals = async () => {
       try {
-        setLoading(true);
-        const response = await axios.get(API_URL, {
-          headers: {
-            'X-API-KEY': API_KEY,
-          },
-        });
-
+        const response = await getSignals();
+        // Transform the response object into an array for easy mapping
         const signalsArray = Object.entries(response.data).map(([symbol, signal]) => ({
           symbol,
           signal,
@@ -26,19 +18,23 @@ function Dashboard() {
       } catch (error) {
         console.error('Error fetching signals:', error);
       } finally {
-        setLoading(false);
+        // Set loading to false only after the first fetch
+        if (loading) {
+            setLoading(false);
+        }
       }
     };
 
-    fetchSignals();
-    const interval = setInterval(fetchSignals, 15000);
-    return () => clearInterval(interval);
-  }, []);
+    fetchSignals(); // Initial fetch
+    const interval = setInterval(fetchSignals, 15000); // Refresh every 15 seconds
+
+    return () => clearInterval(interval); // Cleanup on component unmount
+  }, [loading]); // Rerun effect if loading changes (for initial setup)
 
   return (
     <div className="container mx-auto p-4">
       <h1 className="text-3xl font-bold text-center mb-6 text-gray-800">
-        Real-Time Crypto Signals
+        Real-Time Crypto Signals 📊
       </h1>
       {loading ? (
         <p className="text-center text-gray-600">Loading signals...</p>
@@ -59,15 +55,15 @@ function Dashboard() {
                     index % 2 === 0 ? 'bg-gray-50' : ''
                   }`}
                 >
-                  <td className="py-3 px-6 text-left whitespace-nowrap">{symbol}</td>
+                  <td className="py-3 px-6 text-left whitespace-nowrap font-medium">{symbol}</td>
                   <td className="py-3 px-6 text-left">
                     <span
-                      className={`py-1 px-3 rounded-full text-xs ${
-                        signal === 'L33BC(BUY)'
+                      className={`py-1 px-3 rounded-full text-xs font-semibold ${
+                        signal.includes('BUY')
                           ? 'bg-green-200 text-green-800'
-                          : signal === 'NO_SIGNAL'
-                          ? 'bg-gray-200 text-gray-800'
-                          : 'bg-red-200 text-red-800'
+                          : signal.includes('SELL')
+                          ? 'bg-red-200 text-red-800'
+                          : 'bg-gray-200 text-gray-800'
                       }`}
                     >
                       {signal}

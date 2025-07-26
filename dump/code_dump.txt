@@ -21,6 +21,17 @@ if __name__ == "__main__":
 
 
 ================================================================================
+# 📄 test.py
+================================================================================
+
+from src.firestore_client import test_firestore
+
+if __name__ == "__main__":
+    test_firestore()
+
+
+
+================================================================================
 # 📄 api\app.py
 ================================================================================
 
@@ -344,6 +355,26 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+================================================================================
+# 📄 src\firestore_client.py
+================================================================================
+
+import os
+from google.cloud import firestore
+
+# Set the path to your JSON key
+key_path = os.path.join(os.path.dirname(__file__), '..', 'firestore_key.json')
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+
+# Initialize Firestore
+db = firestore.Client()
+
+# Optional: test access
+def test_firestore():
+    print("[Firestore] Connected to project:", db.project)
 
 
 
