@@ -1,11 +1,8 @@
-// frontend/src/components/RuleBuilder.jsx
 import { useState, useEffect } from 'react';
-// ✅ UPDATED: Import getConfig and remove config file imports
 import { getRules, saveRule, updateRule, deleteRule, getConfig } from '../apiService';
 
 const defaultLiteral = { type: 'literal', value: 0 };
 
-// ✅ UPDATED: This component now receives the config from its parent
 const AdvancedOperandSelector = ({ value, onChange, config }) => {
     if (!value || !config) {
         return <div className="p-2 border rounded bg-gray-200 animate-pulse h-48"></div>;
@@ -26,7 +23,6 @@ const AdvancedOperandSelector = ({ value, onChange, config }) => {
 
     const handleTimeframeChange = (e) => {
         const newTimeframe = e.target.value;
-        // Get the first valid parameter set for the new timeframe
         const newParams = config.macdParamsByTimeframe[newTimeframe][0];
         onChange({ ...value, timeframe: newTimeframe, params: newParams });
     };
@@ -66,15 +62,13 @@ const AdvancedOperandSelector = ({ value, onChange, config }) => {
 function RuleBuilder() {
     const [rules, setRules] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
-    // ✅ NEW: State to hold the dynamic config from the API
     const [appConfig, setAppConfig] = useState(null);
-    
+
     const [ruleName, setRuleName] = useState('');
     const [signal, setSignal] = useState('');
     const [conditions, setConditions] = useState([]);
     const [editingRuleId, setEditingRuleId] = useState(null);
 
-    // ✅ This function now initializes the form using the dynamic config
     const resetForm = (config) => {
         const targetConfig = config || appConfig;
         setRuleName('');
@@ -99,14 +93,14 @@ function RuleBuilder() {
             setAppConfig(configRes.data);
             const rulesRes = await getRules();
             setRules(rulesRes.data);
-            resetForm(configRes.data); // Reset form once config is loaded
+            resetForm(configRes.data);
         } catch (error) {
             console.error("Failed to fetch initial data:", error);
         } finally {
             setIsLoading(false);
         }
     };
-    
+
     useEffect(() => {
         fetchInitialData();
     }, []);
@@ -117,6 +111,27 @@ function RuleBuilder() {
             setRules(response.data);
         } catch (error) {
             console.error("Failed to fetch rules:", error);
+        }
+    };
+
+    const handleTelegramToggle = async (ruleToUpdate) => {
+        const updatedRule = {
+            ...ruleToUpdate,
+            telegram_enabled: !ruleToUpdate.telegram_enabled
+        };
+
+        setRules(currentRules =>
+            currentRules.map(r => r.id === updatedRule.id ? updatedRule : r)
+        );
+
+        try {
+            await updateRule(ruleToUpdate.id, updatedRule);
+        } catch (error) {
+            console.error("Failed to update Telegram toggle:", error);
+            setRules(currentRules =>
+                currentRules.map(r => r.id === ruleToUpdate.id ? ruleToUpdate : r)
+            );
+            alert("Error updating rule. Please try again.");
         }
     };
 
@@ -132,7 +147,7 @@ function RuleBuilder() {
         const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 };
         setConditions([...conditions, { operand1: defaultIndicator, operator: appConfig.operators[0], operand2: defaultLiteral }]);
     };
-    
+
     const removeCondition = (index) => {
         setConditions(conditions.filter((_, i) => i !== index));
     };
@@ -143,7 +158,7 @@ function RuleBuilder() {
         setSignal(rule.signal);
         setConditions(rule.conditions);
     };
-    
+
     const handleDelete = async (ruleId) => {
         if (window.confirm("Are you sure you want to delete this rule?")) {
             try {
@@ -160,7 +175,8 @@ function RuleBuilder() {
         const ruleJSON = {
             name: ruleName,
             signal: signal,
-            conditions: conditions
+            conditions: conditions,
+            telegram_enabled: rules.find(r => r.id === editingRuleId)?.telegram_enabled || false
         };
 
         try {
@@ -178,7 +194,6 @@ function RuleBuilder() {
         }
     };
 
-    // ✅ UPDATED: Show a loading state until the config is fetched
     if (isLoading || !appConfig) {
         return <div className="container mx-auto p-4 text-center">Loading configuration and rules...</div>;
     }
@@ -188,36 +203,30 @@ function RuleBuilder() {
             <h1 className="text-2xl font-bold mb-4">{editingRuleId ? 'Edit Logic Rule' : 'Create Logic Rule'}</h1>
             <form onSubmit={handleSaveOrUpdateRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                    <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
-                    <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
+                    <input type="text" placeholder="Rule Name" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
+                    <input type="text" placeholder="Signal (e.g. BUY)" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
                 </div>
 
-                <h3 className="text-lg font-semibold mb-2">Conditions (All must be TRUE)</h3>
+                <h3 className="text-lg font-semibold mb-2">Conditions</h3>
                 {conditions.map((cond, index) => (
                     <div key={index} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start border-t pt-4 mt-4">
-                        {/* ✅ UPDATED: Pass the appConfig to the selector */}
                         <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
                         <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="p-2 border rounded self-center">
-                            {/* ✅ UPDATED: Use operators from the config */}
                             {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
                         </select>
                         <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} config={appConfig} />
                         <button type="button" onClick={() => removeCondition(index)} className="bg-red-500 text-white p-2 rounded self-center hover:bg-red-600">Remove</button>
                     </div>
                 ))}
-                
-                <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">
-                    + Add Condition
-                </button>
+
+                <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">+ Add Condition</button>
 
                 <div className="flex items-center mt-6 space-x-4">
                     <button type="submit" className="w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
                         {editingRuleId ? 'Update Rule' : 'Save New Rule'}
                     </button>
                     {editingRuleId && (
-                        <button type="button" onClick={() => resetForm()} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">
-                            Cancel Edit
-                        </button>
+                        <button type="button" onClick={() => resetForm()} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">Cancel</button>
                     )}
                 </div>
             </form>
@@ -227,10 +236,24 @@ function RuleBuilder() {
                 {rules.length === 0 ? <p>No rules saved yet.</p> :
                     <ul>
                         {rules.map(rule => (
-                            <li key={rule.id} className="border-b p-2 flex justify-between items-center">
-                                <span>{rule.name} ({rule.signal})</span>
-                                <div>
-                                    <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded mr-2 text-sm hover:bg-yellow-600">Edit</button>
+                            <li key={rule.id} className="border-b p-3 flex justify-between items-center">
+                                <span className="font-semibold">{rule.name} <span className="font-normal text-gray-600">({rule.signal})</span></span>
+                                <div className="flex items-center space-x-4">
+                                    <label htmlFor={`telegram-${rule.id}`} className="flex items-center cursor-pointer">
+                                        <span className="mr-2 text-sm text-gray-700">Telegram Alert</span>
+                                        <div className="relative">
+                                            <input
+                                                type="checkbox"
+                                                id={`telegram-${rule.id}`}
+                                                className="sr-only"
+                                                checked={!!rule.telegram_enabled}
+                                                onChange={() => handleTelegramToggle(rule)}
+                                            />
+                                            <div className="block bg-gray-300 w-10 h-6 rounded-full"></div>
+                                            <div className={`dot absolute left-1 top-1 w-4 h-4 rounded-full transition-transform ${rule.telegram_enabled ? 'translate-x-full bg-green-500' : 'bg-white'}`}></div>
+                                        </div>
+                                    </label>
+                                    <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded text-sm hover:bg-yellow-600">Edit</button>
                                     <button onClick={() => handleDelete(rule.id)} className="bg-red-500 text-white py-1 px-3 rounded text-sm hover:bg-red-600">Delete</button>
                                 </div>
                             </li>

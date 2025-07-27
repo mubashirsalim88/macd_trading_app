@@ -198,6 +198,12 @@ if __name__ == "__main__":
 import pandas as pd
 
 def add_macd(df, fast=12, slow=26, signal=9):
+    # ✅ Check if there's enough data for the calculation
+    # The slow EMA requires the most data, so we check against that.
+    if len(df) <= slow:
+        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
+        return pd.DataFrame() # Return an empty DataFrame to signal failure
+
     if 'Close' not in df.columns:
         print("[Error] 'Close' column not found in DataFrame.")
         return df
@@ -216,7 +222,6 @@ def add_macd(df, fast=12, slow=26, signal=9):
     return df
 
 
-
 ================================================================================
 # 📄 api/app.py
 ================================================================================
@@ -225,12 +230,14 @@ import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers, debug_single_rule  # ✅ Added debug_single_rule
-from api.firestore_client import save_rule, get_all_rules                # ✅ Ensure get_all_rules is imported
+from api.logic_evaluator import evaluate_all_tickers, debug_single_rule
+from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
 import json
 import os
 from dotenv import load_dotenv
 from typing import List, Optional
+# ✅ ADDED: Import MACD_PARAMS to use in the new config endpoint
+from src.config import MACD_PARAMS
 
 # Load API key from environment
 load_dotenv()
@@ -245,15 +252,50 @@ def require_api_key():
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "message": "API is running"})
+
+# ✅ NEW ENDPOINT
+@app.route('/api/config', methods=['GET'])
+def get_app_config():
+    """
+    Provides the frontend with dynamic configuration, including only the
+    MACD parameters that can be calculated with 7 days of data.
+    """
+    # Define how many candles are in the 7-day period for each interval
+    CANDLES_IN_7_DAYS = {
+        '1m': 60 * 24 * 7,   # 10,080 candles
+        '5m': 12 * 24 * 7,   #  2,016 candles
+        '15m': 4 * 24 * 7    #    672 candles
+    }
+
+    # Filter the MACD params to only include ones that are possible to calculate
+    valid_params = {}
+    for timeframe, params_list in MACD_PARAMS.items():
+        max_candles = CANDLES_IN_7_DAYS.get(timeframe, 0)
+        # Keep a param set only if its 'slow' value (p[1]) is less than the available candles
+        valid_params[timeframe] = [
+            p for p in params_list if p[1] < max_candles
+        ]
+
+    # This config will be sent to the frontend
+    frontend_config = {
+        'timeframes': list(MACD_PARAMS.keys()),
+        'operators': ['>', '<', '>=', '<='],
+        'macdValues': ['macd_line', 'signal_line', 'histogram'],
+        'macdParamsByTimeframe': valid_params
+    }
+    return jsonify(frontend_config)
+
+
 @app.route('/api/rules', methods=['POST'])
 def create_rule():
     auth_error = require_api_key()
     if auth_error: return auth_error
-    
     rule_data = request.get_json()
     if not rule_data or 'name' not in rule_data:
         return jsonify({"error": "Invalid rule data"}), 400
-        
     saved_rule = save_rule(rule_data)
     return jsonify(saved_rule), 201
 
@@ -261,27 +303,39 @@ def create_rule():
 def list_rules():
     auth_error = require_api_key()
     if auth_error: return auth_error
-
     all_rules = get_all_rules()
     return jsonify(all_rules), 200
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ok", "message": "API is running"})
+@app.route('/api/rules/<string:rule_id>', methods=['PUT'])
+def update_rule_endpoint(rule_id):
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+    rule_data = request.get_json()
+    if not rule_data:
+        return jsonify({"error": "Invalid data"}), 400
+    updated_rule = update_rule(rule_id, rule_data)
+    return jsonify(updated_rule), 200
+
+@app.route('/api/rules/<string:rule_id>', methods=['DELETE'])
+def delete_rule_endpoint(rule_id):
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+    try:
+        delete_rule(rule_id)
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/data/<string:ticker>', methods=['GET'])
 def get_data(ticker: str):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-
     try:
         keys = r.keys(f"{ticker}:*")
         keys: List[bytes] = keys
-        
         if not keys:
             return jsonify({"error": f"No data found for ticker {ticker}"}), 404
-        
         result = {ticker: {}}
         for key in keys:
             key_str = key.decode('utf-8')
@@ -291,21 +345,10 @@ def get_data(ticker: str):
             if data:
                 data_list = json.loads(data.decode('utf-8'))
                 if isinstance(data_list, list) and len(data_list) == 3:
-                    result[ticker][f"{interval}:{params}"] = [
-                        {
-                            "macd_line": item["macd_line"],
-                            "signal_line": item["signal_line"],
-                            "histogram": item["histogram"],
-                            "date": item["date"]
-                        }
-                        for item in data_list
-                    ]
-        
+                    result[ticker][f"{interval}:{params}"] = data_list
         if not result[ticker]:
             return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
-            
         return jsonify(result)
-    
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
@@ -322,24 +365,20 @@ def get_signals():
         print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
-# ✅ NEW DEBUG ENDPOINT
 @app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
 def debug_rule(ticker):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-
     all_rules = get_all_rules()
     if not all_rules:
         return jsonify({"error": "No rules found in the database to debug."}), 404
-
     first_rule = all_rules[0]
     debug_result = debug_single_rule(first_rule, ticker)
     return jsonify(debug_result)
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
-
 
 
 ================================================================================
@@ -494,6 +533,18 @@ def save_rule(rule_data: dict):
     doc_ref.set(rule_data)
     return rule_data
 
+def update_rule(rule_id: str, rule_data: dict):
+    """Updates an existing rule in Firestore."""
+    doc_ref = rules_collection.document(rule_id)
+    # Ensure the ID from the URL is used and saved in the document
+    rule_data['id'] = rule_id
+    doc_ref.set(rule_data) # set() with an existing doc ID overwrites it
+    return rule_data
+
+def delete_rule(rule_id: str):
+    """Deletes a rule from Firestore."""
+    rules_collection.document(rule_id).delete()
+
 
 
 
@@ -554,17 +605,21 @@ const API_BASE_URL = import.meta.env.VITE_API_URL;
 const API_KEY = import.meta.env.VITE_API_KEY;
 
 const apiClient = axios.create({
-  baseURL: API_BASE_URL, // Should be http://34.83.108.47:5000
+  baseURL: API_BASE_URL,
   headers: {
     'X-API-KEY': API_KEY,
     'Content-Type': 'application/json'
   }
 });
 
-// Use the full path from the base URL
+// ✅ NEW FUNCTION
+export const getConfig = () => apiClient.get('/api/config');
+
 export const getSignals = () => apiClient.get('/api/signals');
 export const getRules = () => apiClient.get('/api/rules');
 export const saveRule = (ruleData) => apiClient.post('/api/rules', ruleData);
+export const updateRule = (ruleId, ruleData) => apiClient.put(`/api/rules/${ruleId}`, ruleData);
+export const deleteRule = (ruleId) => apiClient.delete(`/api/rules/${ruleId}`);
 
 
 ================================================================================
@@ -628,192 +683,246 @@ export const MACD_PARAMS_BY_TIMEFRAME = {
 
 // frontend/src/components/RuleBuilder.jsx
 import { useState, useEffect } from 'react';
-import { getRules, saveRule } from '../apiService';
-import { TIME_FRAMES, OPERATORS, MACD_VALUES, MACD_PARAMS_BY_TIMEFRAME } from '../config';
+// ✅ UPDATED: Import getConfig and remove config file imports
+import { getRules, saveRule, updateRule, deleteRule, getConfig } from '../apiService';
 
-const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: '1m', params: [12, 26, 9], value: 'macd_line', offset: 0 };
 const defaultLiteral = { type: 'literal', value: 0 };
 
-const AdvancedOperandSelector = ({ value, onChange }) => {
-  if (!value) {
-    return <div className="p-2 border rounded bg-gray-200 animate-pulse"></div>;
-  }
-
-  const isIndicator = value.type === 'indicator';
-
-  const handleTypeChange = (e) => {
-    const newType = e.target.value;
-    if (newType === 'indicator') {
-      onChange(defaultIndicator);
-    } else {
-      onChange(defaultLiteral);
+// ✅ UPDATED: This component now receives the config from its parent
+const AdvancedOperandSelector = ({ value, onChange, config }) => {
+    if (!value || !config) {
+        return <div className="p-2 border rounded bg-gray-200 animate-pulse h-48"></div>;
     }
-  };
 
-  const handleTimeframeChange = (e) => {
-    const newTimeframe = e.target.value;
-    // When timeframe changes, reset params to the first valid option for that timeframe
-    const newParams = MACD_PARAMS_BY_TIMEFRAME[newTimeframe][0];
-    onChange({ ...value, timeframe: newTimeframe, params: newParams });
-  };
+    const isIndicator = value.type === 'indicator';
 
-  return (
-    <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
-      <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
-        <option value="indicator">Indicator</option>
-        <option value="literal">Number</option>
-      </select>
+    const handleTypeChange = (e) => {
+        const newType = e.target.value;
+        if (newType === 'indicator') {
+            const defaultTimeframe = config.timeframes[0];
+            const defaultParams = config.macdParamsByTimeframe[defaultTimeframe][0];
+            onChange({ type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 });
+        } else {
+            onChange(defaultLiteral);
+        }
+    };
 
-      {isIndicator ? (
-        <>
-          <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
-            {TIME_FRAMES.map(tf => <option key={tf} value={tf}>{tf}</option>)}
-          </select>
-          {/* ✅ FIX: This dropdown now filters based on the selected timeframe */}
-          <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
-            {MACD_PARAMS_BY_TIMEFRAME[value.timeframe].map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
-          </select>
-          <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
-            {MACD_VALUES.map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-          <select value={value.offset} onChange={e => onChange({ ...value, offset: parseInt(e.target.value, 10) })} className="p-2 border rounded">
-            <option value={0}>Current Candle</option>
-            <option value={-1}>Previous Candle (PAST1)</option>
-            <option value={-2}>2 Candles Ago (PAST2)</option>
-          </select>
-        </>
-      ) : (
-        <input 
-          type="number"
-          step="any"
-          value={value.value}
-          onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })}
-          className="p-2 border rounded"
-          placeholder="Enter a number"
-        />
-      )}
-    </div>
-  );
+    const handleTimeframeChange = (e) => {
+        const newTimeframe = e.target.value;
+        // Get the first valid parameter set for the new timeframe
+        const newParams = config.macdParamsByTimeframe[newTimeframe][0];
+        onChange({ ...value, timeframe: newTimeframe, params: newParams });
+    };
+
+    const currentParams = config.macdParamsByTimeframe[value.timeframe] || [];
+
+    return (
+        <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
+            <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
+                <option value="indicator">Indicator</option>
+                <option value="literal">Number</option>
+            </select>
+            {isIndicator ? (
+                <>
+                    <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
+                        {config.timeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                    </select>
+                    <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
+                        {currentParams.map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
+                    </select>
+                    <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
+                        {config.macdValues.map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                    <select value={value.offset} onChange={e => onChange({ ...value, offset: parseInt(e.target.value, 10) })} className="p-2 border rounded">
+                        <option value={0}>Current Candle</option>
+                        <option value={-1}>Previous Candle (PAST1)</option>
+                        <option value={-2}>2 Candles Ago (PAST2)</option>
+                    </select>
+                </>
+            ) : (
+                <input type="number" step="any" value={value.value} onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })} className="p-2 border rounded" placeholder="Enter a number" />
+            )}
+        </div>
+    );
 };
 
 function RuleBuilder() {
-  const [rules, setRules] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [ruleName, setRuleName] = useState('');
-  const [signal, setSignal] = useState('');
-  const [conditions, setConditions] = useState([
-    {
-      operand1: { ...defaultIndicator },
-      operator: '>',
-      operand2: { ...defaultIndicator, value: 'signal_line' }
-    }
-  ]);
+    const [rules, setRules] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
+    // ✅ NEW: State to hold the dynamic config from the API
+    const [appConfig, setAppConfig] = useState(null);
+    
+    const [ruleName, setRuleName] = useState('');
+    const [signal, setSignal] = useState('');
+    const [conditions, setConditions] = useState([]);
+    const [editingRuleId, setEditingRuleId] = useState(null);
 
-  const fetchRules = async () => {
-    setIsLoading(true);
-    try {
-      const response = await getRules();
-      setRules(response.data);
-    } catch (error) {
-      console.error("Failed to fetch rules:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchRules();
-  }, []);
-
-  const handleConditionChange = (index, part, newValue) => {
-    const newConditions = [...conditions];
-    newConditions[index][part] = newValue;
-    setConditions(newConditions);
-  };
-
-  const addCondition = () => {
-    setConditions([...conditions, {
-      operand1: defaultIndicator,
-      operator: '>',
-      operand2: defaultLiteral
-    }]);
-  };
-  
-  const removeCondition = (index) => {
-    setConditions(conditions.filter((_, i) => i !== index));
-  };
-
-  const handleSaveRule = async (e) => {
-    e.preventDefault();
-    const ruleJSON = {
-      name: ruleName,
-      signal: signal,
-      conditions: conditions.map(c => ({
-        operand1: c.operand1,
-        operator: c.operator,
-        operand2: c.operand2
-      }))
+    // ✅ This function now initializes the form using the dynamic config
+    const resetForm = (config) => {
+        const targetConfig = config || appConfig;
+        setRuleName('');
+        setSignal('');
+        setEditingRuleId(null);
+        if (targetConfig) {
+            const defaultTimeframe = targetConfig.timeframes[0];
+            const defaultParams = targetConfig.macdParamsByTimeframe[defaultTimeframe][0];
+            const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 };
+            setConditions([{
+                operand1: { ...defaultIndicator },
+                operator: targetConfig.operators[0],
+                operand2: { ...defaultIndicator, value: 'signal_line' }
+            }]);
+        }
     };
 
-    try {
-      await saveRule(ruleJSON);
-      alert('Rule saved successfully!');
-      setRuleName('');
-      setSignal('');
-      setConditions([
-        {
-          operand1: { ...defaultIndicator },
-          operator: '>',
-          operand2: { ...defaultIndicator, value: 'signal_line' }
+    const fetchInitialData = async () => {
+        setIsLoading(true);
+        try {
+            const configRes = await getConfig();
+            setAppConfig(configRes.data);
+            const rulesRes = await getRules();
+            setRules(rulesRes.data);
+            resetForm(configRes.data); // Reset form once config is loaded
+        } catch (error) {
+            console.error("Failed to fetch initial data:", error);
+        } finally {
+            setIsLoading(false);
         }
-      ]);
-      fetchRules();
-    } catch (error) {
-      console.error("Failed to save rule:", error);
-      alert('Failed to save rule.');
+    };
+    
+    useEffect(() => {
+        fetchInitialData();
+    }, []);
+
+    const fetchRules = async () => {
+        try {
+            const response = await getRules();
+            setRules(response.data);
+        } catch (error) {
+            console.error("Failed to fetch rules:", error);
+        }
+    };
+
+    const handleConditionChange = (index, part, newValue) => {
+        const newConditions = [...conditions];
+        newConditions[index][part] = newValue;
+        setConditions(newConditions);
+    };
+
+    const addCondition = () => {
+        const defaultTimeframe = appConfig.timeframes[0];
+        const defaultParams = appConfig.macdParamsByTimeframe[defaultTimeframe][0];
+        const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 };
+        setConditions([...conditions, { operand1: defaultIndicator, operator: appConfig.operators[0], operand2: defaultLiteral }]);
+    };
+    
+    const removeCondition = (index) => {
+        setConditions(conditions.filter((_, i) => i !== index));
+    };
+
+    const handleEdit = (rule) => {
+        setEditingRuleId(rule.id);
+        setRuleName(rule.name);
+        setSignal(rule.signal);
+        setConditions(rule.conditions);
+    };
+    
+    const handleDelete = async (ruleId) => {
+        if (window.confirm("Are you sure you want to delete this rule?")) {
+            try {
+                await deleteRule(ruleId);
+                fetchRules();
+            } catch (error) {
+                console.error("Failed to delete rule:", error);
+            }
+        }
+    };
+
+    const handleSaveOrUpdateRule = async (e) => {
+        e.preventDefault();
+        const ruleJSON = {
+            name: ruleName,
+            signal: signal,
+            conditions: conditions
+        };
+
+        try {
+            if (editingRuleId) {
+                await updateRule(editingRuleId, ruleJSON);
+                alert('Rule updated successfully!');
+            } else {
+                await saveRule(ruleJSON);
+                alert('Rule saved successfully!');
+            }
+            resetForm();
+            fetchRules();
+        } catch (error) {
+            console.error("Failed to save/update rule:", error);
+        }
+    };
+
+    // ✅ UPDATED: Show a loading state until the config is fetched
+    if (isLoading || !appConfig) {
+        return <div className="container mx-auto p-4 text-center">Loading configuration and rules...</div>;
     }
-  };
 
-  return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">Advanced Logic Builder</h1>
-      <form onSubmit={handleSaveRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
-          <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
+    return (
+        <div className="container mx-auto p-4">
+            <h1 className="text-2xl font-bold mb-4">{editingRuleId ? 'Edit Logic Rule' : 'Create Logic Rule'}</h1>
+            <form onSubmit={handleSaveOrUpdateRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
+                    <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
+                </div>
+
+                <h3 className="text-lg font-semibold mb-2">Conditions (All must be TRUE)</h3>
+                {conditions.map((cond, index) => (
+                    <div key={index} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start border-t pt-4 mt-4">
+                        {/* ✅ UPDATED: Pass the appConfig to the selector */}
+                        <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
+                        <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="p-2 border rounded self-center">
+                            {/* ✅ UPDATED: Use operators from the config */}
+                            {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
+                        </select>
+                        <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} config={appConfig} />
+                        <button type="button" onClick={() => removeCondition(index)} className="bg-red-500 text-white p-2 rounded self-center hover:bg-red-600">Remove</button>
+                    </div>
+                ))}
+                
+                <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">
+                    + Add Condition
+                </button>
+
+                <div className="flex items-center mt-6 space-x-4">
+                    <button type="submit" className="w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
+                        {editingRuleId ? 'Update Rule' : 'Save New Rule'}
+                    </button>
+                    {editingRuleId && (
+                        <button type="button" onClick={() => resetForm()} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">
+                            Cancel Edit
+                        </button>
+                    )}
+                </div>
+            </form>
+
+            <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
+            <div className="bg-white shadow-md rounded-lg p-4">
+                {rules.length === 0 ? <p>No rules saved yet.</p> :
+                    <ul>
+                        {rules.map(rule => (
+                            <li key={rule.id} className="border-b p-2 flex justify-between items-center">
+                                <span>{rule.name} ({rule.signal})</span>
+                                <div>
+                                    <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded mr-2 text-sm hover:bg-yellow-600">Edit</button>
+                                    <button onClick={() => handleDelete(rule.id)} className="bg-red-500 text-white py-1 px-3 rounded text-sm hover:bg-red-600">Delete</button>
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
+                }
+            </div>
         </div>
-
-        <h3 className="text-lg font-semibold mb-2">Conditions (All must be TRUE)</h3>
-        {conditions.map((cond, index) => (
-          <div key={index} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start border-t pt-4 mt-4">
-            <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} />
-            <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="p-2 border rounded self-center">
-              {OPERATORS.map(op => <option key={op} value={op}>{op}</option>)}
-            </select>
-            <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} />
-            <button type="button" onClick={() => removeCondition(index)} className="bg-red-500 text-white p-2 rounded self-center hover:bg-red-600">Remove</button>
-          </div>
-        ))}
-        
-        <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">
-          + Add Condition
-        </button>
-
-        <button type="submit" className="mt-6 w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
-          Save New Rule
-        </button>
-      </form>
-
-      <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
-      <div className="bg-white shadow-md rounded-lg p-4">
-        {isLoading ? <p>Loading rules...</p> :
-          <ul>
-            {rules.map(rule => <li key={rule.id} className="border-b p-2">{rule.name} ({rule.signal})</li>)}
-          </ul>
-        }
-      </div>
-    </div>
-  );
+    );
 }
 
 export default RuleBuilder;
