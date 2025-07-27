@@ -2,8 +2,8 @@ import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers, debug_single_rule  # ✅ Added debug_single_rule
-from api.firestore_client import save_rule, get_all_rules                # ✅ Ensure get_all_rules is imported
+from api.logic_evaluator import evaluate_all_tickers, debug_single_rule
+from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
 import json
 import os
 from dotenv import load_dotenv
@@ -22,15 +22,17 @@ def require_api_key():
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "message": "API is running"})
+
 @app.route('/api/rules', methods=['POST'])
 def create_rule():
     auth_error = require_api_key()
     if auth_error: return auth_error
-    
     rule_data = request.get_json()
     if not rule_data or 'name' not in rule_data:
         return jsonify({"error": "Invalid rule data"}), 400
-        
     saved_rule = save_rule(rule_data)
     return jsonify(saved_rule), 201
 
@@ -38,27 +40,39 @@ def create_rule():
 def list_rules():
     auth_error = require_api_key()
     if auth_error: return auth_error
-
     all_rules = get_all_rules()
     return jsonify(all_rules), 200
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ok", "message": "API is running"})
+@app.route('/api/rules/<string:rule_id>', methods=['PUT'])
+def update_rule_endpoint(rule_id):
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+    rule_data = request.get_json()
+    if not rule_data:
+        return jsonify({"error": "Invalid data"}), 400
+    updated_rule = update_rule(rule_id, rule_data)
+    return jsonify(updated_rule), 200
+
+@app.route('/api/rules/<string:rule_id>', methods=['DELETE'])
+def delete_rule_endpoint(rule_id):
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+    try:
+        delete_rule(rule_id)
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/data/<string:ticker>', methods=['GET'])
 def get_data(ticker: str):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-
     try:
         keys = r.keys(f"{ticker}:*")
         keys: List[bytes] = keys
-        
         if not keys:
             return jsonify({"error": f"No data found for ticker {ticker}"}), 404
-        
         result = {ticker: {}}
         for key in keys:
             key_str = key.decode('utf-8')
@@ -68,21 +82,10 @@ def get_data(ticker: str):
             if data:
                 data_list = json.loads(data.decode('utf-8'))
                 if isinstance(data_list, list) and len(data_list) == 3:
-                    result[ticker][f"{interval}:{params}"] = [
-                        {
-                            "macd_line": item["macd_line"],
-                            "signal_line": item["signal_line"],
-                            "histogram": item["histogram"],
-                            "date": item["date"]
-                        }
-                        for item in data_list
-                    ]
-        
+                    result[ticker][f"{interval}:{params}"] = data_list
         if not result[ticker]:
             return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
-            
         return jsonify(result)
-    
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
@@ -99,17 +102,14 @@ def get_signals():
         print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
-# ✅ NEW DEBUG ENDPOINT
 @app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
 def debug_rule(ticker):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-
     all_rules = get_all_rules()
     if not all_rules:
         return jsonify({"error": "No rules found in the database to debug."}), 404
-
     first_rule = all_rules[0]
     debug_result = debug_single_rule(first_rule, ticker)
     return jsonify(debug_result)
