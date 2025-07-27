@@ -1,134 +1,128 @@
-// 📄 frontend/src/components/Dashboard.jsx
+// frontend/src/components/Dashboard.jsx
 
 import { useState, useEffect } from 'react';
-// ✅ UPDATED: Import getRules to populate the filter dropdown
 import { getSignals, getRules } from '../apiService';
+
+// A small SVG component for the refresh spinner
+const RefreshSpinner = () => (
+    <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>
+);
 
 function Dashboard() {
     const [signals, setSignals] = useState([]);
     const [rules, setRules] = useState([]);
-    const [loading, setLoading] = useState(true);
-
-    // ✅ NEW STATE: For managing the filters
+    const [initialLoading, setInitialLoading] = useState(true);
+    // ✅ NEW: State for the silent refresh indicator
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    
     const [activeRuleFilter, setActiveRuleFilter] = useState('all');
     const [showNoSignal, setShowNoSignal] = useState(false);
+    const [lastUpdated, setLastUpdated] = useState(new Date());
 
     useEffect(() => {
         const fetchAllData = async () => {
-            // Set loading to true only on the very first fetch
-            if (loading) setLoading(true);
+            // Only use the main loading state on the very first run
+            if (!initialLoading) {
+                setIsRefreshing(true);
+            }
 
             try {
-                // Fetch both signals and the list of rules simultaneously
-                const [signalsResponse, rulesResponse] = await Promise.all([
-                    getSignals(),
-                    getRules()
-                ]);
-
-                // Transform the signals object into a usable array
+                const [signalsResponse, rulesResponse] = await Promise.all([getSignals(), getRules()]);
                 const signalsArray = Object.entries(signalsResponse.data).map(([symbol, data]) => ({
                     symbol,
                     signal: data.signal,
                     rule_name: data.rule_name,
                 }));
-
                 setSignals(signalsArray);
                 setRules(rulesResponse.data);
-
+                setLastUpdated(new Date());
             } catch (error) {
                 console.error('Error fetching dashboard data:', error);
             } finally {
-                if (loading) setLoading(false);
+                if (initialLoading) setInitialLoading(false);
+                setIsRefreshing(false);
             }
         };
 
-        fetchAllData(); // Initial fetch
-        const interval = setInterval(fetchAllData, 15000); // Refresh every 15 seconds
+        fetchAllData();
+        const interval = setInterval(fetchAllData, 15000);
+        return () => clearInterval(interval);
+    }, []); // This dependency array is intentionally empty to control loading states manually
 
-        return () => clearInterval(interval); // Cleanup on component unmount
-    }, []); // Run only once on mount
-
-    // ✅ Filter the signals based on the active filters before rendering
     const filteredSignals = signals.filter(s => {
         const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
         const signalMatch = showNoSignal || s.signal !== 'NO_SIGNAL';
         return ruleMatch && signalMatch;
     });
 
-    if (loading) {
-        return <p className="text-center text-gray-600 mt-10">Loading signals...</p>;
+    if (initialLoading) {
+        return <p className="text-center text-[var(--text-secondary)] mt-20 text-lg">Initializing Signal Matrix...</p>;
     }
 
     return (
-        <div className="container mx-auto p-4">
-            <h1 className="text-3xl font-bold text-center mb-6 text-gray-800">
-                Real-Time Crypto Signals 📊
-            </h1>
-
-            {/* ✅ FILTER CONTROLS */}
-            <div className="flex flex-col md:flex-row justify-center items-center space-y-4 md:space-y-0 md:space-x-6 bg-white p-4 rounded-lg shadow-sm mb-6">
-                <div className="flex items-center space-x-2">
-                    <label htmlFor="ruleFilter" className="font-semibold text-gray-700">Filter by Rule:</label>
-                    <select
-                        id="ruleFilter"
-                        value={activeRuleFilter}
-                        onChange={e => setActiveRuleFilter(e.target.value)}
-                        className="p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-                    >
-                        <option value="all">All Triggered Signals</option>
-                        {rules.map(rule => (
-                            <option key={rule.id} value={rule.name}>{rule.name}</option>
-                        ))}
-                    </select>
+        <div className="container mx-auto p-4 md:p-6">
+            <div className="text-center mb-6">
+                <h1 className="text-4xl font-extrabold text-white">Signal Dashboard</h1>
+                <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
+                    {isRefreshing && <RefreshSpinner />}
+                    <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
                 </div>
-                <div className="flex items-center">
-                    <input
-                        type="checkbox"
-                        id="showNoSignal"
-                        checked={showNoSignal}
-                        onChange={e => setShowNoSignal(e.target.checked)}
-                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
-                    />
-                    <label htmlFor="showNoSignal" className="ml-2 block text-sm text-gray-900">
-                        Show 'NO_SIGNAL' Tickers
+            </div>
+
+            {/* ✅ REDESIGNED FILTER BAR */}
+            <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center flex-wrap gap-2">
+                        <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
+                        <button 
+                            onClick={() => setActiveRuleFilter('all')}
+                            className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
+                            All Signals
+                        </button>
+                        {rules.map(rule => (
+                            <button 
+                                key={rule.id}
+                                onClick={() => setActiveRuleFilter(rule.name)}
+                                className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === rule.name ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
+                                {rule.name}
+                            </button>
+                        ))}
+                    </div>
+
+                    <label htmlFor="showNoSignal" className="flex items-center cursor-pointer">
+                        <span className="mr-3 text-sm text-[var(--text-secondary)]">Show 'NO_SIGNAL'</span>
+                        <div className="relative">
+                            <input type="checkbox" id="showNoSignal" className="sr-only" checked={showNoSignal} onChange={e => setShowNoSignal(e.target.checked)} />
+                            <div className="block bg-gray-600 w-10 h-6 rounded-full"></div>
+                            <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
+                        </div>
                     </label>
                 </div>
             </div>
 
-            <div className="overflow-x-auto">
-                <table className="min-w-full bg-white shadow-md rounded-lg">
-                    <thead>
-                        <tr className="bg-gray-200 text-gray-600 uppercase text-sm leading-normal">
-                            <th className="py-3 px-6 text-left">Symbol</th>
-                            <th className="py-3 px-6 text-left">Signal</th>
-                            {/* ✅ NEW COLUMN: To show which rule was triggered */}
-                            <th className="py-3 px-6 text-left">Triggered By</th>
-                        </tr>
-                    </thead>
-                    <tbody className="text-gray-600 text-sm font-light">
-                        {filteredSignals.map(({ symbol, signal, rule_name }, index) => (
-                            <tr
-                                key={symbol}
-                                className={`border-b border-gray-200 hover:bg-gray-100 ${index % 2 === 0 ? 'bg-gray-50' : ''}`}
-                            >
-                                <td className="py-3 px-6 text-left whitespace-nowrap font-medium">{symbol}</td>
-                                <td className="py-3 px-6 text-left">
-                                    <span className={`py-1 px-3 rounded-full text-xs font-semibold ${
-                                        signal.includes('BUY') ? 'bg-green-200 text-green-800' :
-                                        signal.includes('SELL') ? 'bg-red-200 text-red-800' :
-                                        'bg-gray-200 text-gray-800'
-                                    }`}>
-                                        {signal}
-                                    </span>
-                                </td>
-                                {/* ✅ Render the rule name */}
-                                <td className="py-3 px-6 text-left italic text-gray-500">
-                                    {rule_name || 'N/A'}
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+                {filteredSignals.map(({ symbol, signal, rule_name }) => {
+                    const isBuy = signal.includes('BUY');
+                    const isSell = signal.includes('SELL');
+                    const signalColorClass = isBuy ? 'text-[var(--accent-buy)]' : isSell ? 'text-[var(--accent-sell)]' : 'text-[var(--text-secondary)]';
+                    const signalBgClass = isBuy ? 'bg-[var(--accent-buy-bg)]' : isSell ? 'bg-[var(--accent-sell-bg)]' : 'bg-gray-700/20';
+                    const borderColorClass = isBuy ? 'border-[var(--accent-buy)]' : isSell ? 'border-[var(--accent-sell)]' : 'border-[var(--border-color)]';
+                    
+                    return (
+                        <div key={symbol} className={`bg-[var(--bg-dark-secondary)] rounded-lg shadow-xl border-l-4 ${borderColorClass} p-5 flex flex-col justify-between transition-transform transform hover:scale-105`}>
+                            <div>
+                                <div className="font-bold text-2xl text-white mb-2">{symbol}</div>
+                                <div className={`font-semibold text-lg ${signalColorClass} mb-3`}>{signal}</div>
+                            </div>
+                            <div className={`text-xs text-right text-[var(--text-secondary)] italic p-2 rounded-md ${signalBgClass}`}>
+                                {rule_name || 'N/A'}
+                            </div>
+                        </div>
+                    );
+                })}
             </div>
         </div>
     );

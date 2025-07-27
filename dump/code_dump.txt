@@ -21,209 +21,7 @@ if __name__ == "__main__":
 
 
 ================================================================================
-# 📄 src/data_fetcher.py
-================================================================================
-
-import yfinance as yf
-import pandas as pd
-
-def get_historical_data(ticker, period='6mo', interval='1d'):
-    try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
-        if df is None or df.empty:
-            print(f"[Warning] No data returned for {ticker}.")
-            return pd.DataFrame()
-        return df
-    except Exception as e:
-        print(f"[Error] Failed to fetch data for {ticker}: {e}")
-        return pd.DataFrame()
-
-
-
-================================================================================
-# 📄 src/redis_client.py
-================================================================================
-
-# src/redis_client.py
-
-import redis
-from redis import Redis
-from typing import Optional, cast, Union, List
-import os
-import json
-
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB = int(os.getenv("REDIS_DB", 0))
-
-r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
-
-def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
-    try:
-        r.set(key, json.dumps(data))
-        print(f"[REDIS] Saved MACD for {key}")
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to save {key}: {e}")
-
-def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
-    try:
-        val = r.get(key)
-        if val:
-            val = cast(bytes, val)
-            return json.loads(val.decode("utf-8"))
-        return None
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
-        return None
-
-
-================================================================================
-# 📄 src/config.py
-================================================================================
-
-# config.py
-
-CRYPTO_TICKERS = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
-    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
-    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
-    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
-    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
-    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
-    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
-    "FTM-USD"
-]
-
-MACD_PARAMS = {
-    '1m': [
-        (12, 26, 9),
-        (36, 78, 27),
-        (60, 130, 45),
-        (180, 390, 135),
-        (360, 780, 270),
-        (720, 1560, 540),
-        (2160, 4680, 1620)
-    ],
-    '5m': [
-        (12, 26, 9),
-        (36, 78, 27),
-        (72, 156, 54),
-        (144, 312, 108),
-        (432, 936, 324),
-        (900, 1950, 675),
-        (4500, 9750, 3375)
-    ],
-    '15m': [
-        (12, 26, 9),
-        (24, 52, 18),
-        (48, 104, 36),
-        (144, 312, 108),
-        (300, 650, 225),
-        (1500, 3250, 1125),
-        (3000, 6500, 2250)
-    ]
-}
-
-
-
-================================================================================
-# 📄 src/engine.py
-================================================================================
-
-# src/engine.py
-
-from src.data_fetcher import get_historical_data
-from src.indicator_calculator import add_macd
-from src.config import CRYPTO_TICKERS, MACD_PARAMS
-from src.redis_client import save_macd_to_redis
-import pandas as pd
-
-def main():
-    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
-
-    for ticker in CRYPTO_TICKERS:
-        for interval, param_list in MACD_PARAMS.items():
-            # This print statement is optional but helpful for seeing progress
-            # print(f"--- {ticker} @ {interval} ---")
-
-            df = get_historical_data(ticker, period="7d", interval=interval)
-            if df.empty:
-                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
-                continue
-
-            for params in param_list:
-                fast, slow, signal = params
-
-                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
-                if df_macd.empty:
-                    continue
-
-                last_three_rows = df_macd.tail(3)
-                if len(last_three_rows) < 3:
-                    continue
-
-                # ✅ FINAL CORRECTED VERSION
-                data_to_save = [
-                    {
-                        "macd_line": float(row.macd_line.iloc[0]),
-                        "signal_line": float(row.signal_line.iloc[0]),
-                        "histogram": float(row.histogram.iloc[0]),
-                        "date": str(index.date())
-                    }
-                    for index, row in last_three_rows.iterrows()
-                ]
-
-                save_macd_to_redis(
-                    ticker,
-                    interval,
-                    {"fast": fast, "slow": slow, "signal": signal},
-                    data_to_save
-                )
-
-    print("\n✅ [INFO] Full scan complete.\n")
-
-if __name__ == "__main__":
-    main()
-
-
-
-================================================================================
-# 📄 src/indicator_calculator.py
-================================================================================
-
-# indicator_calculator.py
-
-import pandas as pd
-
-def add_macd(df, fast=12, slow=26, signal=9):
-    # ✅ Check if there's enough data for the calculation
-    # The slow EMA requires the most data, so we check against that.
-    if len(df) <= slow:
-        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
-        return pd.DataFrame() # Return an empty DataFrame to signal failure
-
-    if 'Close' not in df.columns:
-        print("[Error] 'Close' column not found in DataFrame.")
-        return df
-
-    # Calculate EMAs
-    df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
-    df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
-
-    # MACD and Signal
-    df['macd_line'] = df['fast_ema'] - df['slow_ema']
-    df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
-
-    # Histogram
-    df['histogram'] = df['macd_line'] - df['signal_line']
-
-    return df
-
-
-================================================================================
-# 📄 api/app.py
+# 📄 api\app.py
 ================================================================================
 
 import traceback
@@ -382,137 +180,7 @@ if __name__ == "__main__":
 
 
 ================================================================================
-# 📄 api/logic_evaluator.py
-================================================================================
-
-# api/logic_evaluator.py
-from src.redis_client import get_macd_from_redis
-from src.config import CRYPTO_TICKERS
-from api.firestore_client import get_all_rules
-
-def get_operand_value(operand, ticker):
-    """Recursively resolves the value of an operand."""
-    if operand['type'] == 'literal':
-        return operand['value']
-
-    if operand['type'] == 'indicator':
-        params_dict = {'fast': operand['params'][0], 'slow': operand['params'][1], 'signal': operand['params'][2]}
-        redis_data = get_macd_from_redis(ticker, operand['timeframe'], params_dict)
-        if not redis_data or len(redis_data) < 3:
-            return None
-        # offset: 0=CUR, -1=PAST1, -2=PAST2
-        return redis_data[operand['offset'] - 1][operand['value']]
-
-    if operand['type'] == 'expression':
-        op = operand['operation']
-        values = [get_operand_value(op_arg, ticker) for op_arg in operand['operands']]
-        
-        if any(v is None for v in values):
-            return None
-        
-        try:
-            if op == 'abs': return abs(values[0])
-            if op == 'divide': return values[0] / values[1] if values[1] != 0 else None
-        except Exception:
-            return None
-    return None
-
-def evaluate_single_rule(rule, ticker):
-    """Evaluates a full rule with all its conditions for a given ticker."""
-    
-    # ✅ THIS SAFETY CHECK PREVENTS CRASHES FROM BAD DATA
-    if 'conditions' not in rule or not isinstance(rule['conditions'], list):
-        return False
-
-    for condition in rule['conditions']:
-        val1 = get_operand_value(condition['operand1'], ticker)
-        val2 = get_operand_value(condition['operand2'], ticker)
-
-        if val1 is None or val2 is None:
-            return False # Cannot evaluate if data is missing
-
-        op = condition['operator']
-        
-        is_met = False
-        if op == '>': is_met = val1 > val2
-        elif op == '<': is_met = val1 < val2
-        elif op == '>=': is_met = val1 >= val2
-        elif op == '<=': is_met = val1 <= val2
-        
-        if not is_met:
-            return False # If any condition fails, the whole rule fails
-            
-    return True # All conditions were met
-
-def evaluate_all_tickers():
-    """Loads all rules from Firestore and evaluates them against all tickers."""
-    all_rules = get_all_rules()
-    signals = {ticker: "NO_SIGNAL" for ticker in CRYPTO_TICKERS}
-
-    if not all_rules:
-        return signals
-
-    for ticker in CRYPTO_TICKERS:
-        for rule in all_rules:
-            if evaluate_single_rule(rule, ticker):
-                signals[ticker] = rule['signal']
-                break # Move to the next ticker once a signal is found
-    
-    return signals
-
-def debug_single_rule(rule, ticker):
-    """Provides a detailed step-by-step evaluation of a rule for debugging."""
-    if 'id' not in rule:
-        return {"error": "Rule has no ID"}
-        
-    debug_log = {
-        "rule_name": rule.get('name', 'N/A'),
-        "ticker": ticker,
-        "evaluation_trace": [],
-        "final_result": "FAIL"
-    }
-
-    if 'conditions' not in rule or not isinstance(rule['conditions'], list):
-        debug_log['error'] = "Rule has no 'conditions' or it is not a list."
-        return debug_log
-
-    all_conditions_met = True
-    for i, condition in enumerate(rule['conditions']):
-        trace_step = {}
-        val1 = get_operand_value(condition.get('operand1'), ticker)
-        val2 = get_operand_value(condition.get('operand2'), ticker)
-        op = condition.get('operator')
-
-        trace_step['step'] = i + 1
-        trace_step['operand1_value'] = val1
-        trace_step['operator'] = op
-        trace_step['operand2_value'] = val2
-
-        if val1 is None or val2 is None or op is None:
-            trace_step['result'] = "FAIL (Missing Data)"
-            all_conditions_met = False
-        else:
-            is_met = False
-            if op == '>': is_met = val1 > val2
-            elif op == '<': is_met = val1 < val2
-            elif op == '>=': is_met = val1 >= val2
-            elif op == '<=': is_met = val1 <= val2
-            
-            trace_step['result'] = "PASS" if is_met else "FAIL"
-            if not is_met:
-                all_conditions_met = False
-        
-        debug_log['evaluation_trace'].append(trace_step)
-
-    if all_conditions_met:
-        debug_log['final_result'] = "PASS"
-        
-    return debug_log
-
-
-
-================================================================================
-# 📄 api/firestore_client.py
+# 📄 api\firestore_client.py
 ================================================================================
 
 # api/firestore_client.py
@@ -547,6 +215,409 @@ def delete_rule(rule_id: str):
 
 
 
+================================================================================
+# 📄 api\logic_evaluator.py
+================================================================================
+
+from src.redis_client import get_macd_from_redis
+from src.config import CRYPTO_TICKERS
+from api.firestore_client import get_all_rules
+
+# ✅ NEW: Import Telegram message function
+from api.notifications import send_telegram_message
+
+
+def get_operand_value(operand, ticker):
+    """Recursively resolves the value of an operand."""
+    if not operand:
+        return None
+    if operand['type'] == 'literal':
+        return operand['value']
+
+    if operand['type'] == 'indicator':
+        params_dict = {'fast': operand['params'][0], 'slow': operand['params'][1], 'signal': operand['params'][2]}
+        redis_data = get_macd_from_redis(ticker, operand['timeframe'], params_dict)
+        if not redis_data or len(redis_data) < 3:
+            return None
+        return redis_data[operand['offset'] + 2][operand['value']]
+
+    if operand['type'] == 'expression':
+        op = operand['operation']
+        values = [get_operand_value(op_arg, ticker) for op_arg in operand['operands']]
+
+        if any(v is None for v in values):
+            return None
+
+        try:
+            if op == 'abs':
+                return abs(values[0])
+            if op == 'divide':
+                return values[0] / values[1] if values[1] != 0 else None
+        except Exception:
+            return None
+
+    return None
+
+
+def evaluate_single_rule(rule, ticker):
+    """Evaluates a full rule with all its conditions for a given ticker."""
+    if 'conditions' not in rule or not isinstance(rule['conditions'], list):
+        return False
+
+    for condition in rule['conditions']:
+        val1 = get_operand_value(condition.get('operand1'), ticker)
+        val2 = get_operand_value(condition.get('operand2'), ticker)
+
+        if val1 is None or val2 is None:
+            return False
+
+        op = condition['operator']
+
+        is_met = False
+        if op == '>':
+            is_met = val1 > val2
+        elif op == '<':
+            is_met = val1 < val2
+        elif op == '>=':
+            is_met = val1 >= val2
+        elif op == '<=':
+            is_met = val1 <= val2
+
+        if not is_met:
+            return False
+
+    return True
+
+
+def evaluate_all_tickers():
+    """
+    Loads all rules from Firestore and evaluates them against all tickers.
+    ✅ UPDATED: Sends Telegram alert if a rule requires it.
+    """
+    all_rules = get_all_rules()
+    signals = {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
+
+    if not all_rules:
+        return signals
+
+    for ticker in CRYPTO_TICKERS:
+        for rule in all_rules:
+            if evaluate_single_rule(rule, ticker):
+                signals[ticker]['signal'] = rule['signal']
+                signals[ticker]['rule_name'] = rule.get('name', 'Unnamed Rule')
+
+                # ✅ NEW: Send Telegram message if rule has notifications enabled
+                if rule.get('telegram_enabled', False):
+                    rule_name_safe = rule.get('name', 'Unnamed Rule').replace('-', '\\-').replace('.', '\\.')
+                    ticker_safe = ticker.replace('-', '\\-')
+                    signal_safe = rule['signal'].replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
+
+                    message = (
+                        f"🚨 *NNTE Signal Alert* 🚨\n\n"
+                        f"*Ticker:* `{ticker_safe}`\n"
+                        f"*Signal:* `{signal_safe}`\n"
+                        f"*Rule:* `{rule_name_safe}`"
+                    )
+                    send_telegram_message(message)
+
+                break  # Only apply the first matching rule per ticker
+
+    return signals
+
+
+def debug_single_rule(rule, ticker):
+    """Provides a detailed step-by-step evaluation of a rule for debugging."""
+    if 'id' not in rule:
+        return {"error": "Rule has no ID"}
+
+    debug_log = {
+        "rule_name": rule.get('name', 'N/A'),
+        "ticker": ticker,
+        "evaluation_trace": [],
+        "final_result": "FAIL"
+    }
+
+    if 'conditions' not in rule or not isinstance(rule['conditions'], list):
+        debug_log['error'] = "Rule has no 'conditions' or it is not a list."
+        return debug_log
+
+    all_conditions_met = True
+    for i, condition in enumerate(rule['conditions']):
+        trace_step = {}
+        val1 = get_operand_value(condition.get('operand1'), ticker)
+        val2 = get_operand_value(condition.get('operand2'), ticker)
+        op = condition.get('operator')
+
+        trace_step['step'] = i + 1
+        trace_step['operand1_value'] = val1
+        trace_step['operator'] = op
+        trace_step['operand2_value'] = val2
+
+        if val1 is None or val2 is None or op is None:
+            trace_step['result'] = "FAIL (Missing Data)"
+            all_conditions_met = False
+        else:
+            is_met = False
+            if op == '>':
+                is_met = val1 > val2
+            elif op == '<':
+                is_met = val1 < val2
+            elif op == '>=':
+                is_met = val1 >= val2
+            elif op == '<=':
+                is_met = val1 <= val2
+
+            trace_step['result'] = "PASS" if is_met else "FAIL"
+            if not is_met:
+                all_conditions_met = False
+
+        debug_log['evaluation_trace'].append(trace_step)
+
+    if all_conditions_met:
+        debug_log['final_result'] = "PASS"
+
+    return debug_log
+
+
+
+================================================================================
+# 📄 api\notifications.py
+================================================================================
+
+# 📄 api/notifications.py
+
+import requests
+import os
+
+def send_telegram_message(message: str):
+    """Sends a message to the Telegram channel configured in the .env file."""
+    
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
+    if not token or not chat_id:
+        print("[TELEGRAM ERROR] Bot Token or Chat ID is not configured in .env file.")
+        return
+
+    # Using MarkdownV2 for better formatting
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "MarkdownV2" 
+    }
+    
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status() # Will raise an exception for 4xx/5xx errors
+        print(f"[TELEGRAM] Sent message: {message.splitlines()[0]}...")
+    except requests.exceptions.RequestException as e:
+        print(f"[TELEGRAM ERROR] Failed to send message: {e}")
+
+
+
+================================================================================
+# 📄 src\config.py
+================================================================================
+
+# config.py
+
+CRYPTO_TICKERS = [
+    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
+    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
+    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
+    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
+    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
+    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
+    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
+    "FTM-USD"
+]
+
+MACD_PARAMS = {
+    '1m': [
+        (12, 26, 9),
+        (36, 78, 27),
+        (60, 130, 45),
+        (180, 390, 135),
+        (360, 780, 270),
+        (720, 1560, 540),
+        (2160, 4680, 1620)
+    ],
+    '5m': [
+        (12, 26, 9),
+        (36, 78, 27),
+        (72, 156, 54),
+        (144, 312, 108),
+        (432, 936, 324),
+        (900, 1950, 675),
+        (4500, 9750, 3375)
+    ],
+    '15m': [
+        (12, 26, 9),
+        (24, 52, 18),
+        (48, 104, 36),
+        (144, 312, 108),
+        (300, 650, 225),
+        (1500, 3250, 1125),
+        (3000, 6500, 2250)
+    ]
+}
+
+
+
+================================================================================
+# 📄 src\data_fetcher.py
+================================================================================
+
+import yfinance as yf
+import pandas as pd
+
+def get_historical_data(ticker, period='6mo', interval='1d'):
+    try:
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
+        if df is None or df.empty:
+            print(f"[Warning] No data returned for {ticker}.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        print(f"[Error] Failed to fetch data for {ticker}: {e}")
+        return pd.DataFrame()
+
+
+
+================================================================================
+# 📄 src\engine.py
+================================================================================
+
+# src/engine.py
+
+from src.data_fetcher import get_historical_data
+from src.indicator_calculator import add_macd
+from src.config import CRYPTO_TICKERS, MACD_PARAMS
+from src.redis_client import save_macd_to_redis
+import pandas as pd
+
+def main():
+    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
+
+    for ticker in CRYPTO_TICKERS:
+        for interval, param_list in MACD_PARAMS.items():
+            # This print statement is optional but helpful for seeing progress
+            # print(f"--- {ticker} @ {interval} ---")
+
+            df = get_historical_data(ticker, period="7d", interval=interval)
+            if df.empty:
+                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
+                continue
+
+            for params in param_list:
+                fast, slow, signal = params
+
+                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
+                if df_macd.empty:
+                    continue
+
+                last_three_rows = df_macd.tail(3)
+                if len(last_three_rows) < 3:
+                    continue
+
+                # ✅ FINAL CORRECTED VERSION
+                data_to_save = [
+                    {
+                        "macd_line": float(row.macd_line.iloc[0]),
+                        "signal_line": float(row.signal_line.iloc[0]),
+                        "histogram": float(row.histogram.iloc[0]),
+                        "date": str(index.date())
+                    }
+                    for index, row in last_three_rows.iterrows()
+                ]
+
+                save_macd_to_redis(
+                    ticker,
+                    interval,
+                    {"fast": fast, "slow": slow, "signal": signal},
+                    data_to_save
+                )
+
+    print("\n✅ [INFO] Full scan complete.\n")
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+# 📄 src\indicator_calculator.py
+================================================================================
+
+# indicator_calculator.py
+
+import pandas as pd
+
+def add_macd(df, fast=12, slow=26, signal=9):
+    # ✅ Check if there's enough data for the calculation
+    # The slow EMA requires the most data, so we check against that.
+    if len(df) <= slow:
+        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
+        return pd.DataFrame() # Return an empty DataFrame to signal failure
+
+    if 'Close' not in df.columns:
+        print("[Error] 'Close' column not found in DataFrame.")
+        return df
+
+    # Calculate EMAs
+    df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
+    df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
+
+    # MACD and Signal
+    df['macd_line'] = df['fast_ema'] - df['slow_ema']
+    df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
+
+    # Histogram
+    df['histogram'] = df['macd_line'] - df['signal_line']
+
+    return df
+
+
+================================================================================
+# 📄 src\redis_client.py
+================================================================================
+
+# src/redis_client.py
+
+import redis
+from redis import Redis
+from typing import Optional, cast, Union, List
+import os
+import json
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
+
+r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+    try:
+        r.set(key, json.dumps(data))
+        print(f"[REDIS] Saved MACD for {key}")
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to save {key}: {e}")
+
+def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+    try:
+        val = r.get(key)
+        if val:
+            val = cast(bytes, val)
+            return json.loads(val.decode("utf-8"))
+        return None
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
+        return None
+
+
 
 ================================================================================
 🚀 FRONTEND CODE: ALL FILES IN frontend/src
@@ -554,48 +625,7 @@ def delete_rule(rule_id: str):
 
 
 ================================================================================
-# 📄 frontend/src/App.jsx
-================================================================================
-
-// frontend/src/App.jsx
-import { Routes, Route, NavLink } from 'react-router-dom';
-import Dashboard from './components/Dashboard';
-import RuleBuilder from './components/RuleBuilder';
-
-function App() {
-  const linkStyle = "px-3 py-2 rounded-md text-sm font-medium";
-  const activeLinkStyle = "bg-gray-900 text-white";
-  const inactiveLinkStyle = "text-gray-300 hover:bg-gray-700 hover:text-white";
-
-  return (
-    <div>
-      <nav className="bg-gray-800">
-        <div className="container mx-auto px-4">
-          <div className="flex items-center justify-start h-16">
-            <NavLink to="/" className={({ isActive }) => `${linkStyle} ${isActive ? activeLinkStyle : inactiveLinkStyle}`}>
-              Dashboard
-            </NavLink>
-            <NavLink to="/builder" className={({ isActive }) => `${linkStyle} ${isActive ? activeLinkStyle : inactiveLinkStyle}`}>
-              Rule Builder
-            </NavLink>
-          </div>
-        </div>
-      </nav>
-      <main className="bg-gray-100 min-h-screen">
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/builder" element={<RuleBuilder />} />
-        </Routes>
-      </main>
-    </div>
-  );
-}
-
-export default App;
-
-
-================================================================================
-# 📄 frontend/src/apiService.js
+# 📄 frontend\src\apiService.js
 ================================================================================
 
 // frontend/src/apiService.js
@@ -623,36 +653,65 @@ export const deleteRule = (ruleId) => apiClient.delete(`/api/rules/${ruleId}`);
 
 
 ================================================================================
-# 📄 frontend/src/main.jsx
+# 📄 frontend\src\App.jsx
 ================================================================================
 
-// frontend/src/main.jsx
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App.jsx';
-import './index.css';
-import { BrowserRouter } from 'react-router-dom';
+// frontend/src/App.jsx
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </React.StrictMode>
-);
+import { Routes, Route, NavLink } from 'react-router-dom';
+import Dashboard from './components/Dashboard';
+import RuleBuilder from './components/RuleBuilder';
+
+function App() {
+  const linkStyle = "px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200";
+  const activeLinkStyle = "bg-blue-600 text-white shadow-md";
+  const inactiveLinkStyle = "text-gray-300 hover:bg-gray-700 hover:text-white";
+
+  return (
+    <div className="min-h-screen bg-[var(--bg-dark-primary)] text-[var(--text-primary)]">
+      <nav className="bg-[var(--bg-dark-secondary)] border-b border-[var(--border-color)] shadow-lg">
+        <div className="container mx-auto px-4">
+          <div className="flex items-center justify-between h-16">
+            
+            {/* NNTE Branding Section */}
+            <div className="flex items-center space-x-3">
+              <div className="bg-blue-600 p-2 rounded-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+              </div>
+              <div className="flex flex-col">
+                <span className="font-extrabold text-xl text-white tracking-wider">NNTE</span>
+                <span className="text-xs text-[var(--text-secondary)] hidden sm:block">Neural Network Traders Empire</span>
+              </div>
+            </div>
+
+            {/* Navigation Links */}
+            <div className="flex items-center space-x-4">
+              <NavLink to="/" className={({ isActive }) => `${linkStyle} ${isActive ? activeLinkStyle : inactiveLinkStyle}`}>
+                Dashboard
+              </NavLink>
+              <NavLink to="/builder" className={({ isActive }) => `${linkStyle} ${isActive ? activeLinkStyle : inactiveLinkStyle}`}>
+                Rule Builder
+              </NavLink>
+            </div>
+          </div>
+        </div>
+      </nav>
+      
+      <main>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/builder" element={<RuleBuilder />} />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
+export default App;
 
 
 ================================================================================
-# 📄 frontend/src/index.css
-================================================================================
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-
-================================================================================
-# 📄 frontend/src/config.js
+# 📄 frontend\src\config.js
 ================================================================================
 
 // frontend/src/config.js
@@ -678,20 +737,199 @@ export const MACD_PARAMS_BY_TIMEFRAME = {
 
 
 ================================================================================
-# 📄 frontend/src/components/RuleBuilder.jsx
+# 📄 frontend\src\index.css
 ================================================================================
 
-// frontend/src/components/RuleBuilder.jsx
+/* frontend/src/index.css */
+
+/* Import a clean, modern font from Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* Define our new NNTE color palette */
+:root {
+  --bg-dark-primary: #121212;      /* Deepest background */
+  --bg-dark-secondary: #1E1E1E;    /* Card/container backgrounds */
+  --border-color: #333333;        /* Borders and dividers */
+  
+  --text-primary: #EAEAEA;         /* Primary text */
+  --text-secondary: #A0A0A0;      /* Softer, secondary text */
+  
+  --accent-buy: #22c55e;           /* Green for BUY signals */
+  --accent-buy-bg: rgba(34, 197, 94, 0.1);
+  --accent-sell: #ef4444;          /* Red for SELL signals */
+  --accent-sell-bg: rgba(239, 68, 68, 0.1);
+  
+  --accent-primary: #3b82f6;      /* Blue for primary buttons/actions */
+  --accent-primary-hover: #2563eb;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Apply base styles to the body */
+body {
+  background-color: var(--bg-dark-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+}
+
+/* Custom styling for the Telegram toggle switch we created */
+.dot {
+    transition: transform 0.2s ease-in-out, background-color 0.2s ease-in-out;
+}
+input:checked ~ .dot {
+    transform: translateX(100%);
+    background-color: var(--accent-buy);
+}
+input:checked + .block {
+    background-color: var(--accent-buy-bg);
+    border: 1px solid var(--accent-buy);
+}
+.block {
+    border: 1px solid var(--border-color);
+}
+
+
+================================================================================
+# 📄 frontend\src\main.jsx
+================================================================================
+
+// frontend/src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+import { BrowserRouter } from 'react-router-dom';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+
+================================================================================
+# 📄 frontend\src\components\Dashboard.jsx
+================================================================================
+
+// frontend/src/components/Dashboard.jsx
+
 import { useState, useEffect } from 'react';
-// ✅ UPDATED: Import getConfig and remove config file imports
+import { getSignals, getRules } from '../apiService';
+
+function Dashboard() {
+    const [signals, setSignals] = useState([]);
+    const [rules, setRules] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [activeRuleFilter, setActiveRuleFilter] = useState('all');
+    const [showNoSignal, setShowNoSignal] = useState(false);
+    
+    // We can get the current time here
+    const [lastUpdated, setLastUpdated] = useState(new Date());
+
+    useEffect(() => {
+        const fetchAllData = async () => {
+            if (loading) setLoading(true);
+            try {
+                const [signalsResponse, rulesResponse] = await Promise.all([getSignals(), getRules()]);
+                const signalsArray = Object.entries(signalsResponse.data).map(([symbol, data]) => ({
+                    symbol,
+                    signal: data.signal,
+                    rule_name: data.rule_name,
+                }));
+                setSignals(signalsArray);
+                setRules(rulesResponse.data);
+                setLastUpdated(new Date());
+            } catch (error) {
+                console.error('Error fetching dashboard data:', error);
+            } finally {
+                if (loading) setLoading(false);
+            }
+        };
+        fetchAllData();
+        const interval = setInterval(fetchAllData, 15000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const filteredSignals = signals.filter(s => {
+        const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
+        const signalMatch = showNoSignal || s.signal !== 'NO_SIGNAL';
+        return ruleMatch && signalMatch;
+    });
+
+    if (loading) {
+        return <p className="text-center text-[var(--text-secondary)] mt-20">Initializing signal matrix...</p>;
+    }
+
+    return (
+        <div className="container mx-auto p-4 md:p-6">
+            <div className="text-center mb-8">
+                <h1 className="text-4xl font-extrabold text-white">Signal Dashboard</h1>
+                <p className="text-[var(--text-secondary)] mt-1">Last updated: {lastUpdated.toLocaleTimeString()}</p>
+            </div>
+
+            <div className="flex flex-col md:flex-row justify-center items-center space-y-4 md:space-y-0 md:space-x-6 bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-lg shadow-lg mb-8">
+                <div className="flex items-center space-x-3">
+                    <label htmlFor="ruleFilter" className="font-semibold text-gray-300">Filter by Logic:</label>
+                    <select id="ruleFilter" value={activeRuleFilter} onChange={e => setActiveRuleFilter(e.target.value)} className="bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md p-2 focus:ring-2 focus:ring-[var(--accent-primary)]">
+                        <option value="all">All Triggered Signals</option>
+                        {rules.map(rule => <option key={rule.id} value={rule.name}>{rule.name}</option>)}
+                    </select>
+                </div>
+                <label htmlFor="showNoSignal" className="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" id="showNoSignal" checked={showNoSignal} onChange={e => setShowNoSignal(e.target.checked)} className="h-4 w-4 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-600"/>
+                    <span className="text-sm text-gray-300">Show 'NO_SIGNAL' Tickers</span>
+                </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+                {filteredSignals.map(({ symbol, signal, rule_name }) => {
+                    const isBuy = signal.includes('BUY');
+                    const isSell = signal.includes('SELL');
+                    const signalColorClass = isBuy ? 'text-[var(--accent-buy)]' : isSell ? 'text-[var(--accent-sell)]' : 'text-[var(--text-secondary)]';
+                    const signalBgClass = isBuy ? 'bg-[var(--accent-buy-bg)]' : isSell ? 'bg-[var(--accent-sell-bg)]' : 'bg-gray-700/20';
+                    const borderColorClass = isBuy ? 'border-[var(--accent-buy)]' : isSell ? 'border-[var(--accent-sell)]' : 'border-[var(--border-color)]';
+                    
+                    return (
+                        <div key={symbol} className={`bg-[var(--bg-dark-secondary)] rounded-lg shadow-xl border-l-4 ${borderColorClass} p-5 flex flex-col justify-between transition-transform transform hover:scale-105`}>
+                            <div>
+                                <div className="font-bold text-2xl text-white mb-2">{symbol}</div>
+                                <div className={`font-semibold text-lg ${signalColorClass} mb-3`}>{signal}</div>
+                            </div>
+                            <div className={`text-xs text-right text-[var(--text-secondary)] italic p-2 rounded-md ${signalBgClass}`}>
+                                {rule_name || 'N/A'}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+export default Dashboard;
+
+
+================================================================================
+# 📄 frontend\src\components\RuleBuilder.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
 import { getRules, saveRule, updateRule, deleteRule, getConfig } from '../apiService';
+
+// A small helper for the "X" icon
+const CloseIcon = () => (
+    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+);
 
 const defaultLiteral = { type: 'literal', value: 0 };
 
-// ✅ UPDATED: This component now receives the config from its parent
 const AdvancedOperandSelector = ({ value, onChange, config }) => {
     if (!value || !config) {
-        return <div className="p-2 border rounded bg-gray-200 animate-pulse h-48"></div>;
+        return <div className="p-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-dark-primary)] animate-pulse h-52"></div>;
     }
 
     const isIndicator = value.type === 'indicator';
@@ -709,38 +947,38 @@ const AdvancedOperandSelector = ({ value, onChange, config }) => {
 
     const handleTimeframeChange = (e) => {
         const newTimeframe = e.target.value;
-        // Get the first valid parameter set for the new timeframe
         const newParams = config.macdParamsByTimeframe[newTimeframe][0];
         onChange({ ...value, timeframe: newTimeframe, params: newParams });
     };
 
     const currentParams = config.macdParamsByTimeframe[value.timeframe] || [];
+    const baseInputStyle = "w-full p-2 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]";
 
     return (
-        <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
-            <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
+        <div className="flex flex-col space-y-3 p-3 border border-[var(--border-color)] rounded-lg bg-[var(--bg-dark-primary)]">
+            <select value={value.type} onChange={handleTypeChange} className={`${baseInputStyle} font-semibold`}>
                 <option value="indicator">Indicator</option>
                 <option value="literal">Number</option>
             </select>
             {isIndicator ? (
                 <>
-                    <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
+                    <select value={value.timeframe} onChange={handleTimeframeChange} className={baseInputStyle}>
                         {config.timeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
                     </select>
-                    <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
+                    <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className={baseInputStyle}>
                         {currentParams.map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
                     </select>
-                    <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
+                    <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className={baseInputStyle}>
                         {config.macdValues.map(v => <option key={v} value={v}>{v}</option>)}
                     </select>
-                    <select value={value.offset} onChange={e => onChange({ ...value, offset: parseInt(e.target.value, 10) })} className="p-2 border rounded">
+                    <select value={value.offset} onChange={e => onChange({ ...value, offset: parseInt(e.target.value, 10) })} className={baseInputStyle}>
                         <option value={0}>Current Candle</option>
                         <option value={-1}>Previous Candle (PAST1)</option>
                         <option value={-2}>2 Candles Ago (PAST2)</option>
                     </select>
                 </>
             ) : (
-                <input type="number" step="any" value={value.value} onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })} className="p-2 border rounded" placeholder="Enter a number" />
+                <input type="number" step="any" value={value.value} onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })} className={baseInputStyle} placeholder="Enter a number" />
             )}
         </div>
     );
@@ -749,15 +987,16 @@ const AdvancedOperandSelector = ({ value, onChange, config }) => {
 function RuleBuilder() {
     const [rules, setRules] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
-    // ✅ NEW: State to hold the dynamic config from the API
     const [appConfig, setAppConfig] = useState(null);
-    
+
+    // ✅ State to control the visibility of the create/edit form
+    const [isFormVisible, setIsFormVisible] = useState(false);
+
     const [ruleName, setRuleName] = useState('');
     const [signal, setSignal] = useState('');
     const [conditions, setConditions] = useState([]);
     const [editingRuleId, setEditingRuleId] = useState(null);
 
-    // ✅ This function now initializes the form using the dynamic config
     const resetForm = (config) => {
         const targetConfig = config || appConfig;
         setRuleName('');
@@ -775,14 +1014,31 @@ function RuleBuilder() {
         }
     };
 
+    const handleAddNewClick = () => {
+        resetForm(appConfig);
+        setIsFormVisible(true);
+    };
+    
+    const handleEditClick = (rule) => {
+        setEditingRuleId(rule.id);
+        setRuleName(rule.name);
+        setSignal(rule.signal);
+        setConditions(rule.conditions);
+        setIsFormVisible(true);
+    };
+
+    const handleCancel = () => {
+        resetForm(appConfig);
+        setIsFormVisible(false);
+    };
+
     const fetchInitialData = async () => {
         setIsLoading(true);
         try {
-            const configRes = await getConfig();
+            const [configRes, rulesRes] = await Promise.all([getConfig(), getRules()]);
             setAppConfig(configRes.data);
-            const rulesRes = await getRules();
             setRules(rulesRes.data);
-            resetForm(configRes.data); // Reset form once config is loaded
+            resetForm(configRes.data);
         } catch (error) {
             console.error("Failed to fetch initial data:", error);
         } finally {
@@ -798,15 +1054,23 @@ function RuleBuilder() {
         try {
             const response = await getRules();
             setRules(response.data);
+        } catch (error) { console.error("Failed to fetch rules:", error); }
+    };
+    
+    const handleTelegramToggle = async (ruleToUpdate) => {
+        const updatedRule = { ...ruleToUpdate, telegram_enabled: !ruleToUpdate.telegram_enabled };
+        setRules(currentRules => currentRules.map(r => r.id === updatedRule.id ? updatedRule : r));
+        try {
+            await updateRule(ruleToUpdate.id, updatedRule);
         } catch (error) {
-            console.error("Failed to fetch rules:", error);
+            console.error("Failed to update Telegram toggle:", error);
+            setRules(currentRules => currentRules.map(r => r.id === ruleToUpdate.id ? ruleToUpdate : r));
+            alert("Error updating rule. Please try again.");
         }
     };
 
     const handleConditionChange = (index, part, newValue) => {
-        const newConditions = [...conditions];
-        newConditions[index][part] = newValue;
-        setConditions(newConditions);
+        setConditions(conditions.map((c, i) => i === index ? { ...c, [part]: newValue } : c));
     };
 
     const addCondition = () => {
@@ -816,25 +1080,14 @@ function RuleBuilder() {
         setConditions([...conditions, { operand1: defaultIndicator, operator: appConfig.operators[0], operand2: defaultLiteral }]);
     };
     
-    const removeCondition = (index) => {
-        setConditions(conditions.filter((_, i) => i !== index));
-    };
+    const removeCondition = (index) => setConditions(conditions.filter((_, i) => i !== index));
 
-    const handleEdit = (rule) => {
-        setEditingRuleId(rule.id);
-        setRuleName(rule.name);
-        setSignal(rule.signal);
-        setConditions(rule.conditions);
-    };
-    
     const handleDelete = async (ruleId) => {
-        if (window.confirm("Are you sure you want to delete this rule?")) {
+        if (window.confirm("Are you sure you want to permanently delete this rule?")) {
             try {
                 await deleteRule(ruleId);
                 fetchRules();
-            } catch (error) {
-                console.error("Failed to delete rule:", error);
-            }
+            } catch (error) { console.error("Failed to delete rule:", error); }
         }
     };
 
@@ -843,78 +1096,105 @@ function RuleBuilder() {
         const ruleJSON = {
             name: ruleName,
             signal: signal,
-            conditions: conditions
+            conditions: conditions,
+            telegram_enabled: rules.find(r => r.id === editingRuleId)?.telegram_enabled || false
         };
 
         try {
             if (editingRuleId) {
                 await updateRule(editingRuleId, ruleJSON);
-                alert('Rule updated successfully!');
             } else {
                 await saveRule(ruleJSON);
-                alert('Rule saved successfully!');
             }
-            resetForm();
-            fetchRules();
+            await fetchRules(); // Re-fetch all rules to ensure UI is in sync
+            setIsFormVisible(false); // Hide form on successful save/update
         } catch (error) {
             console.error("Failed to save/update rule:", error);
+            alert("Failed to save rule. Check console for errors.");
         }
     };
 
-    // ✅ UPDATED: Show a loading state until the config is fetched
     if (isLoading || !appConfig) {
-        return <div className="container mx-auto p-4 text-center">Loading configuration and rules...</div>;
+        return <div className="container mx-auto p-4 text-center text-[var(--text-secondary)]">Loading Logic Engine...</div>;
     }
 
     return (
-        <div className="container mx-auto p-4">
-            <h1 className="text-2xl font-bold mb-4">{editingRuleId ? 'Edit Logic Rule' : 'Create Logic Rule'}</h1>
-            <form onSubmit={handleSaveOrUpdateRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                    <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
-                    <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
-                </div>
-
-                <h3 className="text-lg font-semibold mb-2">Conditions (All must be TRUE)</h3>
-                {conditions.map((cond, index) => (
-                    <div key={index} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start border-t pt-4 mt-4">
-                        {/* ✅ UPDATED: Pass the appConfig to the selector */}
-                        <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
-                        <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="p-2 border rounded self-center">
-                            {/* ✅ UPDATED: Use operators from the config */}
-                            {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
-                        </select>
-                        <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} config={appConfig} />
-                        <button type="button" onClick={() => removeCondition(index)} className="bg-red-500 text-white p-2 rounded self-center hover:bg-red-600">Remove</button>
-                    </div>
-                ))}
-                
-                <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">
-                    + Add Condition
-                </button>
-
-                <div className="flex items-center mt-6 space-x-4">
-                    <button type="submit" className="w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
-                        {editingRuleId ? 'Update Rule' : 'Save New Rule'}
+        <div className="container mx-auto p-4 md:p-6">
+            <div className="flex justify-between items-center mb-8">
+                <h1 className="text-4xl font-extrabold text-white">Logic Engine</h1>
+                {!isFormVisible && (
+                    <button onClick={handleAddNewClick} className="bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-2 px-4 rounded-lg shadow-lg transition-colors">
+                        + Create New Logic
                     </button>
-                    {editingRuleId && (
-                        <button type="button" onClick={() => resetForm()} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">
-                            Cancel Edit
-                        </button>
-                    )}
-                </div>
-            </form>
+                )}
+            </div>
 
-            <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
-            <div className="bg-white shadow-md rounded-lg p-4">
-                {rules.length === 0 ? <p>No rules saved yet.</p> :
+            {isFormVisible && (
+                <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] rounded-xl p-6 mb-8 shadow-2xl">
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-2xl font-bold">{editingRuleId ? 'Edit Logic' : 'Create New Logic'}</h2>
+                        <button onClick={handleCancel} className="text-[var(--text-secondary)] hover:text-white"><CloseIcon /></button>
+                    </div>
+                    
+                    <form onSubmit={handleSaveOrUpdateRule}>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                            <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]" />
+                            <input type="text" placeholder="Signal on Trigger (e.g., L33BC_BUY)" value={signal} onChange={e => setSignal(e.target.value)} required className="p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]" />
+                        </div>
+
+                        <h3 className="text-lg font-semibold mb-2 text-gray-300">Conditions (All must be TRUE)</h3>
+                        <div className="space-y-4">
+                            {conditions.map((cond, index) => (
+                                <div key={index} className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr_auto] gap-4 items-center bg-[var(--bg-dark-secondary)] p-4 rounded-lg border border-[var(--border-color)]">
+                                    <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
+                                    <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="w-full lg:w-auto p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)] font-mono text-lg">
+                                        {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
+                                    </select>
+                                    <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} config={appConfig} />
+                                    <button type="button" onClick={() => removeCondition(index)} className="bg-red-600/20 text-red-400 p-2 rounded-full hover:bg-red-500 hover:text-white transition-colors self-center">
+                                        <CloseIcon />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                        
+                        <button type="button" onClick={addCondition} className="mt-4 text-sm text-[var(--accent-primary)] hover:underline">
+                            + Add Condition
+                        </button>
+
+                        <div className="flex items-center mt-6 border-t border-[var(--border-color)] pt-6 space-x-4">
+                            <button type="submit" className="flex-grow bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-3 px-4 rounded-lg shadow-lg transition-colors">
+                                {editingRuleId ? 'Update Rule' : 'Save New Rule'}
+                            </button>
+                            <button type="button" onClick={handleCancel} className="flex-grow bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-white font-bold py-3 px-4 rounded-lg transition-colors">
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            )}
+            
+            <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] rounded-xl shadow-lg">
+                <h3 className="text-xl font-bold p-4 border-b border-[var(--border-color)]">Saved Logic Library</h3>
+                {rules.length === 0 ? <p className="p-4 text-[var(--text-secondary)]">No logic saved yet. Click 'Create New Logic' to begin.</p> :
                     <ul>
                         {rules.map(rule => (
-                            <li key={rule.id} className="border-b p-2 flex justify-between items-center">
-                                <span>{rule.name} ({rule.signal})</span>
+                            <li key={rule.id} className="border-b border-[var(--border-color)] p-4 flex justify-between items-center hover:bg-[var(--bg-dark-primary)] transition-colors">
                                 <div>
-                                    <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded mr-2 text-sm hover:bg-yellow-600">Edit</button>
-                                    <button onClick={() => handleDelete(rule.id)} className="bg-red-500 text-white py-1 px-3 rounded text-sm hover:bg-red-600">Delete</button>
+                                    <span className="font-bold text-lg text-white">{rule.name}</span>
+                                    <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded">{rule.signal}</span>
+                                </div>
+                                <div className="flex items-center space-x-4">
+                                    <label htmlFor={`telegram-${rule.id}`} className="flex items-center cursor-pointer">
+                                        <span className="mr-3 text-sm text-[var(--text-secondary)]">Telegram Alert</span>
+                                        <div className="relative">
+                                            <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)}/>
+                                            <div className="block bg-gray-600 w-10 h-6 rounded-full"></div>
+                                            <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
+                                        </div>
+                                    </label>
+                                    <button onClick={() => handleEditClick(rule)} className="text-blue-400 hover:text-blue-300 font-semibold">Edit</button>
+                                    <button onClick={() => handleDelete(rule.id)} className="text-red-500 hover:text-red-400 font-semibold">Delete</button>
                                 </div>
                             </li>
                         ))}
@@ -926,92 +1206,4 @@ function RuleBuilder() {
 }
 
 export default RuleBuilder;
-
-
-================================================================================
-# 📄 frontend/src/components/Dashboard.jsx
-================================================================================
-
-import { useState, useEffect } from 'react';
-import { getSignals } from '../apiService';
-
-function Dashboard() {
-  const [signals, setSignals] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchSignals = async () => {
-      try {
-        const response = await getSignals();
-        // Transform the response object into an array for easy mapping
-        const signalsArray = Object.entries(response.data).map(([symbol, signal]) => ({
-          symbol,
-          signal,
-        }));
-        setSignals(signalsArray);
-      } catch (error) {
-        console.error('Error fetching signals:', error);
-      } finally {
-        // Set loading to false only after the first fetch
-        if (loading) {
-            setLoading(false);
-        }
-      }
-    };
-
-    fetchSignals(); // Initial fetch
-    const interval = setInterval(fetchSignals, 15000); // Refresh every 15 seconds
-
-    return () => clearInterval(interval); // Cleanup on component unmount
-  }, [loading]); // Rerun effect if loading changes (for initial setup)
-
-  return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-3xl font-bold text-center mb-6 text-gray-800">
-        Real-Time Crypto Signals 📊
-      </h1>
-      {loading ? (
-        <p className="text-center text-gray-600">Loading signals...</p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="min-w-full bg-white shadow-md rounded-lg">
-            <thead>
-              <tr className="bg-gray-200 text-gray-600 uppercase text-sm leading-normal">
-                <th className="py-3 px-6 text-left">Symbol</th>
-                <th className="py-3 px-6 text-left">Signal</th>
-              </tr>
-            </thead>
-            <tbody className="text-gray-600 text-sm font-light">
-              {signals.map(({ symbol, signal }, index) => (
-                <tr
-                  key={symbol}
-                  className={`border-b border-gray-200 hover:bg-gray-100 ${
-                    index % 2 === 0 ? 'bg-gray-50' : ''
-                  }`}
-                >
-                  <td className="py-3 px-6 text-left whitespace-nowrap font-medium">{symbol}</td>
-                  <td className="py-3 px-6 text-left">
-                    <span
-                      className={`py-1 px-3 rounded-full text-xs font-semibold ${
-                        signal.includes('BUY')
-                          ? 'bg-green-200 text-green-800'
-                          : signal.includes('SELL')
-                          ? 'bg-red-200 text-red-800'
-                          : 'bg-gray-200 text-gray-800'
-                      }`}
-                    >
-                      {signal}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-export default Dashboard;
 
