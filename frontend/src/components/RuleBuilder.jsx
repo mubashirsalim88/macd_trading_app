@@ -48,12 +48,15 @@ function RuleBuilder() {
 
   const handleSaveRule = async (e) => {
     e.preventDefault();
+
+    // ✅ FINAL CORRECTED JSON STRUCTURE
     const ruleJSON = {
       name: ruleName,
       signal: signal,
-      groups: [{
-        group_operator: "AND",
-        conditions: [{ operand1: op1, operator: operator, operand2: op2 }]
+      conditions: [{ 
+        operand1: op1, 
+        operator: operator, 
+        operand2: op2 
       }]
     };
 

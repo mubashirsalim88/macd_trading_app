@@ -132,6 +132,8 @@ MACD_PARAMS = {
 # 📄 src/engine.py
 ================================================================================
 
+# src/engine.py
+
 from src.data_fetcher import get_historical_data
 from src.indicator_calculator import add_macd
 from src.config import CRYPTO_TICKERS, MACD_PARAMS
@@ -143,7 +145,8 @@ def main():
 
     for ticker in CRYPTO_TICKERS:
         for interval, param_list in MACD_PARAMS.items():
-            print(f"--- {ticker} @ {interval} ---")
+            # This print statement is optional but helpful for seeing progress
+            # print(f"--- {ticker} @ {interval} ---")
 
             df = get_historical_data(ticker, period="7d", interval=interval)
             if df.empty:
@@ -157,13 +160,11 @@ def main():
                 if df_macd.empty:
                     continue
 
-                # Get the last 3 rows of the DataFrame
                 last_three_rows = df_macd.tail(3)
                 if len(last_three_rows) < 3:
-                    print(f"[WARNING] Not enough data for {ticker} {params} (found {len(last_three_rows)} rows), skipping.")
                     continue
 
-                # Convert the last 3 rows to a list of dictionaries
+                # ✅ FINAL CORRECTED VERSION
                 data_to_save = [
                     {
                         "macd_line": float(row.macd_line.iloc[0]),
@@ -217,37 +218,15 @@ def add_macd(df, fast=12, slow=26, signal=9):
 
 
 ================================================================================
-# 📄 src/firestore_client.py
-================================================================================
-
-import os
-from google.cloud import firestore
-
-# Set the path to your JSON key
-key_path = os.path.join(os.path.dirname(__file__), '..', 'firestore_key.json')
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-
-# Initialize Firestore
-db = firestore.Client()
-
-# Optional: test access
-def test_firestore():
-    print("[Firestore] Connected to project:", db.project)
-
-
-
-================================================================================
 # 📄 api/app.py
 ================================================================================
-
-# api/app.py
 
 import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers
-from api.firestore_client import save_rule, get_all_rules
+from api.logic_evaluator import evaluate_all_tickers, debug_single_rule  # ✅ Added debug_single_rule
+from api.firestore_client import save_rule, get_all_rules                # ✅ Ensure get_all_rules is imported
 import json
 import os
 from dotenv import load_dotenv
@@ -339,10 +318,24 @@ def get_signals():
         signals = evaluate_all_tickers()
         return jsonify(signals), 200
     except Exception:
-        # This will catch the crash and return the full error traceback
         error_trace = traceback.format_exc()
-        print(error_trace) # Also print it to the server log
+        print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
+
+# ✅ NEW DEBUG ENDPOINT
+@app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
+def debug_rule(ticker):
+    auth_error = require_api_key()
+    if auth_error:
+        return auth_error
+
+    all_rules = get_all_rules()
+    if not all_rules:
+        return jsonify({"error": "No rules found in the database to debug."}), 404
+
+    first_rule = all_rules[0]
+    debug_result = debug_single_rule(first_rule, ticker)
+    return jsonify(debug_result)
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
@@ -373,7 +366,6 @@ def get_operand_value(operand, ticker):
 
     if operand['type'] == 'expression':
         op = operand['operation']
-        # Resolve nested operands
         values = [get_operand_value(op_arg, ticker) for op_arg in operand['operands']]
         
         if any(v is None for v in values):
@@ -382,13 +374,17 @@ def get_operand_value(operand, ticker):
         try:
             if op == 'abs': return abs(values[0])
             if op == 'divide': return values[0] / values[1] if values[1] != 0 else None
-            # Add other operations like 'add', 'subtract' here if needed
         except Exception:
             return None
     return None
 
 def evaluate_single_rule(rule, ticker):
     """Evaluates a full rule with all its conditions for a given ticker."""
+    
+    # ✅ THIS SAFETY CHECK PREVENTS CRASHES FROM BAD DATA
+    if 'conditions' not in rule or not isinstance(rule['conditions'], list):
+        return False
+
     for condition in rule['conditions']:
         val1 = get_operand_value(condition['operand1'], ticker)
         val2 = get_operand_value(condition['operand2'], ticker)
@@ -424,6 +420,55 @@ def evaluate_all_tickers():
                 break # Move to the next ticker once a signal is found
     
     return signals
+
+def debug_single_rule(rule, ticker):
+    """Provides a detailed step-by-step evaluation of a rule for debugging."""
+    if 'id' not in rule:
+        return {"error": "Rule has no ID"}
+        
+    debug_log = {
+        "rule_name": rule.get('name', 'N/A'),
+        "ticker": ticker,
+        "evaluation_trace": [],
+        "final_result": "FAIL"
+    }
+
+    if 'conditions' not in rule or not isinstance(rule['conditions'], list):
+        debug_log['error'] = "Rule has no 'conditions' or it is not a list."
+        return debug_log
+
+    all_conditions_met = True
+    for i, condition in enumerate(rule['conditions']):
+        trace_step = {}
+        val1 = get_operand_value(condition.get('operand1'), ticker)
+        val2 = get_operand_value(condition.get('operand2'), ticker)
+        op = condition.get('operator')
+
+        trace_step['step'] = i + 1
+        trace_step['operand1_value'] = val1
+        trace_step['operator'] = op
+        trace_step['operand2_value'] = val2
+
+        if val1 is None or val2 is None or op is None:
+            trace_step['result'] = "FAIL (Missing Data)"
+            all_conditions_met = False
+        else:
+            is_met = False
+            if op == '>': is_met = val1 > val2
+            elif op == '<': is_met = val1 < val2
+            elif op == '>=': is_met = val1 >= val2
+            elif op == '<=': is_met = val1 <= val2
+            
+            trace_step['result'] = "PASS" if is_met else "FAIL"
+            if not is_met:
+                all_conditions_met = False
+        
+        debug_log['evaluation_trace'].append(trace_step)
+
+    if all_conditions_met:
+        debug_log['final_result'] = "PASS"
+        
+    return debug_log
 
 
 
@@ -623,12 +668,15 @@ function RuleBuilder() {
 
   const handleSaveRule = async (e) => {
     e.preventDefault();
+
+    // ✅ FINAL CORRECTED JSON STRUCTURE
     const ruleJSON = {
       name: ruleName,
       signal: signal,
-      groups: [{
-        group_operator: "AND",
-        conditions: [{ operand1: op1, operator: operator, operand2: op2 }]
+      conditions: [{ 
+        operand1: op1, 
+        operator: operator, 
+        operand2: op2 
       }]
     };
 
@@ -680,6 +728,7 @@ function RuleBuilder() {
 }
 
 export default RuleBuilder;
+
 
 
 ================================================================================

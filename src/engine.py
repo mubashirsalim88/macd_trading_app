@@ -1,3 +1,5 @@
+# src/engine.py
+
 from src.data_fetcher import get_historical_data
 from src.indicator_calculator import add_macd
 from src.config import CRYPTO_TICKERS, MACD_PARAMS
@@ -9,7 +11,8 @@ def main():
 
     for ticker in CRYPTO_TICKERS:
         for interval, param_list in MACD_PARAMS.items():
-            print(f"--- {ticker} @ {interval} ---")
+            # This print statement is optional but helpful for seeing progress
+            # print(f"--- {ticker} @ {interval} ---")
 
             df = get_historical_data(ticker, period="7d", interval=interval)
             if df.empty:
@@ -23,13 +26,11 @@ def main():
                 if df_macd.empty:
                     continue
 
-                # Get the last 3 rows of the DataFrame
                 last_three_rows = df_macd.tail(3)
                 if len(last_three_rows) < 3:
-                    print(f"[WARNING] Not enough data for {ticker} {params} (found {len(last_three_rows)} rows), skipping.")
                     continue
 
-                # Convert the last 3 rows to a list of dictionaries
+                # ✅ FINAL CORRECTED VERSION
                 data_to_save = [
                     {
                         "macd_line": float(row.macd_line.iloc[0]),
