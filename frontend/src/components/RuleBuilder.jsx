@@ -1,13 +1,12 @@
 // frontend/src/components/RuleBuilder.jsx
 import { useState, useEffect } from 'react';
 import { getRules, saveRule } from '../apiService';
-import { TIME_FRAMES, OPERATORS, MACD_VALUES, MACD_PARAMS_OPTIONS } from '../config';
+import { TIME_FRAMES, OPERATORS, MACD_VALUES, MACD_PARAMS_BY_TIMEFRAME } from '../config';
 
 const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: '1m', params: [12, 26, 9], value: 'macd_line', offset: 0 };
 const defaultLiteral = { type: 'literal', value: 0 };
 
 const AdvancedOperandSelector = ({ value, onChange }) => {
-  // This check prevents a crash if the value prop is temporarily undefined
   if (!value) {
     return <div className="p-2 border rounded bg-gray-200 animate-pulse"></div>;
   }
@@ -23,6 +22,13 @@ const AdvancedOperandSelector = ({ value, onChange }) => {
     }
   };
 
+  const handleTimeframeChange = (e) => {
+    const newTimeframe = e.target.value;
+    // When timeframe changes, reset params to the first valid option for that timeframe
+    const newParams = MACD_PARAMS_BY_TIMEFRAME[newTimeframe][0];
+    onChange({ ...value, timeframe: newTimeframe, params: newParams });
+  };
+
   return (
     <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
       <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
@@ -32,11 +38,12 @@ const AdvancedOperandSelector = ({ value, onChange }) => {
 
       {isIndicator ? (
         <>
-          <select value={value.timeframe} onChange={e => onChange({ ...value, timeframe: e.target.value })} className="p-2 border rounded">
+          <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
             {TIME_FRAMES.map(tf => <option key={tf} value={tf}>{tf}</option>)}
           </select>
+          {/* ✅ FIX: This dropdown now filters based on the selected timeframe */}
           <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
-            {MACD_PARAMS_OPTIONS.map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
+            {MACD_PARAMS_BY_TIMEFRAME[value.timeframe].map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
           </select>
           <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
             {MACD_VALUES.map(v => <option key={v} value={v}>{v}</option>)}
@@ -66,8 +73,6 @@ function RuleBuilder() {
   const [isLoading, setIsLoading] = useState(true);
   const [ruleName, setRuleName] = useState('');
   const [signal, setSignal] = useState('');
-  
-  // ✅ THIS LINE IS THE FIX for the crash
   const [conditions, setConditions] = useState([
     {
       operand1: { ...defaultIndicator },
@@ -127,7 +132,7 @@ function RuleBuilder() {
       alert('Rule saved successfully!');
       setRuleName('');
       setSignal('');
-      setConditions([ // Reset to a single, default condition
+      setConditions([
         {
           operand1: { ...defaultIndicator },
           operator: '>',
