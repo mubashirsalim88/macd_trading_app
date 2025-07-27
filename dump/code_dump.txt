@@ -21,216 +21,66 @@ if __name__ == "__main__":
 
 
 ================================================================================
-# 📄 test.py
+# 📄 src/data_fetcher.py
 ================================================================================
 
-from src.firestore_client import test_firestore
+import yfinance as yf
+import pandas as pd
 
-if __name__ == "__main__":
-    test_firestore()
+def get_historical_data(ticker, period='6mo', interval='1d'):
+    try:
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
+        if df is None or df.empty:
+            print(f"[Warning] No data returned for {ticker}.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        print(f"[Error] Failed to fetch data for {ticker}: {e}")
+        return pd.DataFrame()
 
 
 
 ================================================================================
-# 📄 api\app.py
+# 📄 src/redis_client.py
 ================================================================================
 
-# api/app.py
+# src/redis_client.py
 
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers
-import json
+import redis
+from redis import Redis
+from typing import Optional, cast, Union, List
 import os
-from dotenv import load_dotenv
-from typing import List, Optional
+import json
 
-# Load API key from environment
-load_dotenv()
-API_KEY = os.getenv("API_KEY")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
-app = Flask(__name__)
-CORS(app)
+r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
-def require_api_key():
-    client_key = request.headers.get('X-API-KEY')
-    if client_key != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
-    return None
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ok", "message": "API is running"})
-
-@app.route('/api/data/<string:ticker>', methods=['GET'])
-def get_data(ticker: str):
-    auth_error = require_api_key()
-    if auth_error:
-        return auth_error
-
+def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
     try:
-        keys = r.keys(f"{ticker}:*")  # type: ignore
-        keys: List[bytes] = keys
-        
-        if not keys:
-            return jsonify({"error": f"No data found for ticker {ticker}"}), 404
-        
-        result = {ticker: {}}
-        for key in keys:
-            key_str = key.decode('utf-8')
-            _, interval, params = key_str.split(':')
-            data = r.get(key)  # type: ignore
-            data: Optional[bytes] = data
-            if data:
-                data_list = json.loads(data.decode('utf-8'))
-                if isinstance(data_list, list) and len(data_list) == 3:
-                    result[ticker][f"{interval}:{params}"] = [
-                        {
-                            "macd_line": item["macd_line"],
-                            "signal_line": item["signal_line"],
-                            "histogram": item["histogram"],
-                            "date": item["date"]
-                        }
-                        for item in data_list
-                    ]
-        
-        if not result[ticker]:
-            return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
-            
-        return jsonify(result)
-    
+        r.set(key, json.dumps(data))
+        print(f"[REDIS] Saved MACD for {key}")
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
+        print(f"[REDIS ERROR] Failed to save {key}: {e}")
 
-@app.route('/api/signals', methods=['GET'])
-def get_signals():
-    auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
     try:
-        signals = evaluate_all_tickers()
-        return jsonify(signals), 200
+        val = r.get(key)
+        if val:
+            val = cast(bytes, val)
+            return json.loads(val.decode("utf-8"))
+        return None
     except Exception as e:
-        return jsonify({"error": f"Failed to evaluate signals: {str(e)}"}), 500
-
-if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=5000)
-
+        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
+        return None
 
 
 ================================================================================
-# 📄 api\logic_evaluator.py
-================================================================================
-
-from src.redis_client import get_macd_from_redis
-from src.config import CRYPTO_TICKERS
-from typing import Dict, Optional, List
-
-def jgd_L33bc(ticker: str) -> str:
-    """
-    Evaluates the 'L33BC' trading logic for a given ticker using 1m interval data.
-    Returns 'L33BC(BUY)', 'L33BC(SELL)', or 'NO_SIGNAL'.
-    """
-    try:
-        # Define the parameters needed for this specific logic
-        params_36_78_27 = {'fast': 36, 'slow': 78, 'signal': 27}
-        params_60_130_45 = {'fast': 60, 'slow': 130, 'signal': 45}
-        params_180_390_135 = {'fast': 180, 'slow': 390, 'signal': 135}
-        params_360_780_270 = {'fast': 360, 'slow': 780, 'signal': 270}
-        params_720_1560_540 = {'fast': 720, 'slow': 1560, 'signal': 540}
-
-        # Fetch the required data from Redis (list of 3 candles)
-        data_36 = get_macd_from_redis(ticker, '1m', params_36_78_27)
-        data_60 = get_macd_from_redis(ticker, '1m', params_60_130_45)
-        data_180 = get_macd_from_redis(ticker, '1m', params_180_390_135)
-        data_360 = get_macd_from_redis(ticker, '1m', params_360_780_270)
-        data_720 = get_macd_from_redis(ticker, '1m', params_720_1560_540)
-        
-        # If any data is missing or not a list of 3 candles, return NO_SIGNAL
-        if not all([data_36, data_60, data_180, data_360, data_720]) or \
-           not all(isinstance(d, list) and len(d) == 3 for d in [data_36, data_60, data_180, data_360, data_720]):
-            return "NO_SIGNAL"
-
-        # Assign CUR, PAST1, PAST2 values from the list of 3 candles
-        # Candle -1 is CUR, -2 is PAST1, -3 is PAST2
-        # Use type: ignore to suppress Pylance warnings, as checks above ensure data is valid
-        fl_36_cur = data_36[-1]['macd_line']  # type: ignore
-        fl_36_past1 = data_36[-2]['macd_line']  # type: ignore
-        fl_36_past2 = data_36[-3]['macd_line']  # type: ignore
-        sl_36_cur = data_36[-1]['signal_line']  # type: ignore
-        sl_36_past1 = data_36[-2]['signal_line']  # type: ignore
-        sl_36_past2 = data_36[-3]['signal_line']  # type: ignore
-
-        fl_60_cur = data_60[-1]['macd_line']  # type: ignore
-        fl_60_past1 = data_60[-2]['macd_line']  # type: ignore
-        fl_60_past2 = data_60[-3]['macd_line']  # type: ignore
-        sl_60_cur = data_60[-1]['signal_line']  # type: ignore
-
-        fl_180_cur = data_180[-1]['macd_line']  # type: ignore
-        fl_180_past1 = data_180[-2]['macd_line']  # type: ignore
-        fl_180_past2 = data_180[-3]['macd_line']  # type: ignore
-        sl_180_cur = data_180[-1]['signal_line']  # type: ignore
-        sl_180_past1 = data_180[-2]['signal_line']  # type: ignore
-        sl_180_past2 = data_180[-3]['signal_line']  # type: ignore
-        
-        fl_360_cur = data_360[-1]['macd_line']  # type: ignore
-        fl_360_past1 = data_360[-2]['macd_line']  # type: ignore
-        fl_360_past2 = data_360[-3]['macd_line']  # type: ignore
-        
-        fl_720_cur = data_720[-1]['macd_line']  # type: ignore
-        fl_720_past1 = data_720[-2]['macd_line']  # type: ignore
-        fl_720_past2 = data_720[-3]['macd_line']  # type: ignore
-
-        # --- Logic Conditions ---
-        # Condition set 1: Based on MACD(36,78,27)
-        cond1 = (fl_36_cur > fl_36_past1 > fl_36_past2 and
-                 sl_36_cur > sl_36_past1 > sl_36_past2 and
-                 fl_36_cur < 0 and
-                 sl_36_cur < 0 and
-                 fl_36_cur > sl_36_cur)
-        
-        # Condition set 2 (#3BC): Based on MACD(60,130,45)
-        cond2 = (fl_36_cur != 0 and fl_60_cur / abs(fl_36_cur) >= 3 and
-                 fl_60_cur < sl_60_cur and
-                 fl_60_cur > fl_60_past1 > fl_60_past2)
-
-        # Condition set 3 (#4DOM): Based on MACD(180,390,135)
-        cond3 = (fl_180_cur > fl_180_past1 > fl_180_past2 and
-                 sl_180_cur > sl_180_past1 > sl_180_past2)
-
-        # Condition set 4 (#SUPP): Supportive conditions
-        cond4 = (fl_360_cur > fl_360_past1 > fl_360_past2 and
-                 fl_720_cur > fl_720_past1 > fl_720_past2)
-
-        # Return BUY if all conditions are met, else NO_SIGNAL
-        # Note: SELL signal not implemented as per provided logic
-        if all([cond1, cond2, cond3, cond4]):
-            return "L33BC(BUY)"
-        return "NO_SIGNAL"
-
-    except (KeyError, IndexError, TypeError, ZeroDivisionError) as e:
-        print(f"[LOGIC ERROR] Could not evaluate 'jgd_L33bc' for {ticker}: {e}")
-        return "NO_SIGNAL"
-
-def evaluate_all_tickers() -> Dict[str, str]:
-    """
-    Runs jgd_L33bc for all tickers using 1m interval.
-    Returns a dictionary of ticker:signal pairs.
-    """
-    results = {}
-    for ticker in CRYPTO_TICKERS:
-        signal = jgd_L33bc(ticker)
-        results[ticker] = signal
-    return results
-
-if __name__ == "__main__":
-    signals = evaluate_all_tickers()
-    print(signals)
-
-
-================================================================================
-# 📄 src\config.py
+# 📄 src/config.py
 ================================================================================
 
 # config.py
@@ -279,27 +129,7 @@ MACD_PARAMS = {
 
 
 ================================================================================
-# 📄 src\data_fetcher.py
-================================================================================
-
-import yfinance as yf
-import pandas as pd
-
-def get_historical_data(ticker, period='6mo', interval='1d'):
-    try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
-        if df is None or df.empty:
-            print(f"[Warning] No data returned for {ticker}.")
-            return pd.DataFrame()
-        return df
-    except Exception as e:
-        print(f"[Error] Failed to fetch data for {ticker}: {e}")
-        return pd.DataFrame()
-
-
-
-================================================================================
-# 📄 src\engine.py
+# 📄 src/engine.py
 ================================================================================
 
 from src.data_fetcher import get_historical_data
@@ -359,27 +189,7 @@ if __name__ == "__main__":
 
 
 ================================================================================
-# 📄 src\firestore_client.py
-================================================================================
-
-import os
-from google.cloud import firestore
-
-# Set the path to your JSON key
-key_path = os.path.join(os.path.dirname(__file__), '..', 'firestore_key.json')
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
-
-# Initialize Firestore
-db = firestore.Client()
-
-# Optional: test access
-def test_firestore():
-    print("[Firestore] Connected to project:", db.project)
-
-
-
-================================================================================
-# 📄 src\indicator_calculator.py
+# 📄 src/indicator_calculator.py
 ================================================================================
 
 # indicator_calculator.py
@@ -407,40 +217,555 @@ def add_macd(df, fast=12, slow=26, signal=9):
 
 
 ================================================================================
-# 📄 src\redis_client.py
+# 📄 src/firestore_client.py
 ================================================================================
 
-# src/redis_client.py
-
-import redis
-from redis import Redis
-from typing import Optional, cast, Union, List
 import os
+from google.cloud import firestore
+
+# Set the path to your JSON key
+key_path = os.path.join(os.path.dirname(__file__), '..', 'firestore_key.json')
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+
+# Initialize Firestore
+db = firestore.Client()
+
+# Optional: test access
+def test_firestore():
+    print("[Firestore] Connected to project:", db.project)
+
+
+
+================================================================================
+# 📄 api/app.py
+================================================================================
+
+# api/app.py
+
+import traceback
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from src.redis_client import r
+from api.logic_evaluator import evaluate_all_tickers
+from api.firestore_client import save_rule, get_all_rules
 import json
+import os
+from dotenv import load_dotenv
+from typing import List, Optional
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB = int(os.getenv("REDIS_DB", 0))
+# Load API key from environment
+load_dotenv()
+API_KEY = os.getenv("API_KEY")
 
-r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+app = Flask(__name__)
+CORS(app)
 
-def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+def require_api_key():
+    client_key = request.headers.get('X-API-KEY')
+    if not API_KEY or client_key != API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+@app.route('/api/rules', methods=['POST'])
+def create_rule():
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+    
+    rule_data = request.get_json()
+    if not rule_data or 'name' not in rule_data:
+        return jsonify({"error": "Invalid rule data"}), 400
+        
+    saved_rule = save_rule(rule_data)
+    return jsonify(saved_rule), 201
+
+@app.route('/api/rules', methods=['GET'])
+def list_rules():
+    auth_error = require_api_key()
+    if auth_error: return auth_error
+
+    all_rules = get_all_rules()
+    return jsonify(all_rules), 200
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "message": "API is running"})
+
+@app.route('/api/data/<string:ticker>', methods=['GET'])
+def get_data(ticker: str):
+    auth_error = require_api_key()
+    if auth_error:
+        return auth_error
+
     try:
-        r.set(key, json.dumps(data))
-        print(f"[REDIS] Saved MACD for {key}")
+        keys = r.keys(f"{ticker}:*")
+        keys: List[bytes] = keys
+        
+        if not keys:
+            return jsonify({"error": f"No data found for ticker {ticker}"}), 404
+        
+        result = {ticker: {}}
+        for key in keys:
+            key_str = key.decode('utf-8')
+            _, interval, params = key_str.split(':')
+            data = r.get(key)
+            data: Optional[bytes] = data
+            if data:
+                data_list = json.loads(data.decode('utf-8'))
+                if isinstance(data_list, list) and len(data_list) == 3:
+                    result[ticker][f"{interval}:{params}"] = [
+                        {
+                            "macd_line": item["macd_line"],
+                            "signal_line": item["signal_line"],
+                            "histogram": item["histogram"],
+                            "date": item["date"]
+                        }
+                        for item in data_list
+                    ]
+        
+        if not result[ticker]:
+            return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
+            
+        return jsonify(result)
+    
     except Exception as e:
-        print(f"[REDIS ERROR] Failed to save {key}: {e}")
+        return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
-def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+@app.route('/api/signals', methods=['GET'])
+def get_signals():
+    auth_error = require_api_key()
+    if auth_error:
+        return auth_error
     try:
-        val = r.get(key)
-        if val:
-            val = cast(bytes, val)
-            return json.loads(val.decode("utf-8"))
-        return None
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
-        return None
+        signals = evaluate_all_tickers()
+        return jsonify(signals), 200
+    except Exception:
+        # This will catch the crash and return the full error traceback
+        error_trace = traceback.format_exc()
+        print(error_trace) # Also print it to the server log
+        return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
+
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0', port=5000)
+
+
+
+================================================================================
+# 📄 api/logic_evaluator.py
+================================================================================
+
+# api/logic_evaluator.py
+from src.redis_client import get_macd_from_redis
+from src.config import CRYPTO_TICKERS
+from api.firestore_client import get_all_rules
+
+def get_operand_value(operand, ticker):
+    """Recursively resolves the value of an operand."""
+    if operand['type'] == 'literal':
+        return operand['value']
+
+    if operand['type'] == 'indicator':
+        params_dict = {'fast': operand['params'][0], 'slow': operand['params'][1], 'signal': operand['params'][2]}
+        redis_data = get_macd_from_redis(ticker, operand['timeframe'], params_dict)
+        if not redis_data or len(redis_data) < 3:
+            return None
+        # offset: 0=CUR, -1=PAST1, -2=PAST2
+        return redis_data[operand['offset'] - 1][operand['value']]
+
+    if operand['type'] == 'expression':
+        op = operand['operation']
+        # Resolve nested operands
+        values = [get_operand_value(op_arg, ticker) for op_arg in operand['operands']]
+        
+        if any(v is None for v in values):
+            return None
+        
+        try:
+            if op == 'abs': return abs(values[0])
+            if op == 'divide': return values[0] / values[1] if values[1] != 0 else None
+            # Add other operations like 'add', 'subtract' here if needed
+        except Exception:
+            return None
+    return None
+
+def evaluate_single_rule(rule, ticker):
+    """Evaluates a full rule with all its conditions for a given ticker."""
+    for condition in rule['conditions']:
+        val1 = get_operand_value(condition['operand1'], ticker)
+        val2 = get_operand_value(condition['operand2'], ticker)
+
+        if val1 is None or val2 is None:
+            return False # Cannot evaluate if data is missing
+
+        op = condition['operator']
+        
+        is_met = False
+        if op == '>': is_met = val1 > val2
+        elif op == '<': is_met = val1 < val2
+        elif op == '>=': is_met = val1 >= val2
+        elif op == '<=': is_met = val1 <= val2
+        
+        if not is_met:
+            return False # If any condition fails, the whole rule fails
+            
+    return True # All conditions were met
+
+def evaluate_all_tickers():
+    """Loads all rules from Firestore and evaluates them against all tickers."""
+    all_rules = get_all_rules()
+    signals = {ticker: "NO_SIGNAL" for ticker in CRYPTO_TICKERS}
+
+    if not all_rules:
+        return signals
+
+    for ticker in CRYPTO_TICKERS:
+        for rule in all_rules:
+            if evaluate_single_rule(rule, ticker):
+                signals[ticker] = rule['signal']
+                break # Move to the next ticker once a signal is found
+    
+    return signals
+
+
+
+================================================================================
+# 📄 api/firestore_client.py
+================================================================================
+
+# api/firestore_client.py
+from google.cloud import firestore
+
+# The library will now automatically use the VM's service account permissions
+db = firestore.Client()
+rules_collection = db.collection('rules')
+
+def get_all_rules():
+    """Fetches all documents from the 'rules' collection."""
+    return [doc.to_dict() for doc in rules_collection.stream()]
+
+def save_rule(rule_data: dict):
+    """Saves a new rule to Firestore, letting Firestore auto-generate the ID."""
+    doc_ref = rules_collection.document()
+    rule_data['id'] = doc_ref.id
+    doc_ref.set(rule_data)
+    return rule_data
+
+
+
+
+================================================================================
+🚀 FRONTEND CODE: ALL FILES IN frontend/src
+================================================================================
+
+
+================================================================================
+# 📄 frontend/src/App.jsx
+================================================================================
+
+// frontend/src/App.jsx
+import { Routes, Route, NavLink } from 'react-router-dom';
+import Dashboard from './components/Dashboard';
+import RuleBuilder from './components/RuleBuilder';
+
+function App() {
+  const linkStyle = "px-3 py-2 rounded-md text-sm font-medium";
+  const activeLinkStyle = "bg-gray-900 text-white";
+  const inactiveLinkStyle = "text-gray-300 hover:bg-gray-700 hover:text-white";
+
+  return (
+    <div>
+      <nav className="bg-gray-800">
+        <div className="container mx-auto px-4">
+          <div className="flex items-center justify-start h-16">
+            <NavLink to="/" className={({ isActive }) => `${linkStyle} ${isActive ? activeLinkStyle : inactiveLinkStyle}`}>
+              Dashboard
+            </NavLink>
+            <NavLink to="/builder" className={({ isActive }) => `${linkStyle} ${isActive ? activeLinkStyle : inactiveLinkStyle}`}>
+              Rule Builder
+            </NavLink>
+          </div>
+        </div>
+      </nav>
+      <main className="bg-gray-100 min-h-screen">
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/builder" element={<RuleBuilder />} />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
+export default App;
+
+
+================================================================================
+# 📄 frontend/src/apiService.js
+================================================================================
+
+// frontend/src/apiService.js
+import axios from 'axios';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL;
+const API_KEY = import.meta.env.VITE_API_KEY;
+
+const apiClient = axios.create({
+  baseURL: API_BASE_URL, // Should be http://34.83.108.47:5000
+  headers: {
+    'X-API-KEY': API_KEY,
+    'Content-Type': 'application/json'
+  }
+});
+
+// Use the full path from the base URL
+export const getSignals = () => apiClient.get('/api/signals');
+export const getRules = () => apiClient.get('/api/rules');
+export const saveRule = (ruleData) => apiClient.post('/api/rules', ruleData);
+
+
+================================================================================
+# 📄 frontend/src/main.jsx
+================================================================================
+
+// frontend/src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+import { BrowserRouter } from 'react-router-dom';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+
+================================================================================
+# 📄 frontend/src/index.css
+================================================================================
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+================================================================================
+# 📄 frontend/src/config.js
+================================================================================
+
+// frontend/src/config.js
+export const TIME_FRAMES = ['1m', '5m', '15m'];
+export const OPERATORS = ['>', '<', '>=', '<='];
+export const MACD_VALUES = ['macd_line', 'signal_line', 'histogram'];
+
+// A simplified list for the UI dropdowns
+export const MACD_PARAMS_OPTIONS = [
+    [12, 26, 9],
+    [36, 78, 27],
+    [24, 52, 18],
+    [60, 130, 45]
+];
+
+
+================================================================================
+# 📄 frontend/src/components/RuleBuilder.jsx
+================================================================================
+
+// frontend/src/components/RuleBuilder.jsx
+import { useState, useEffect } from 'react';
+import { getRules, saveRule } from '../apiService';
+import { TIME_FRAMES, OPERATORS, MACD_VALUES, MACD_PARAMS_OPTIONS } from '../config';
+
+// Reusable component for selecting an indicator
+const OperandSelector = ({ value, onChange }) => (
+  <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
+    <select value={value.timeframe} onChange={e => onChange({ ...value, timeframe: e.target.value })} className="p-2 border rounded">
+      {TIME_FRAMES.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+    </select>
+    <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
+      {MACD_PARAMS_OPTIONS.map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
+    </select>
+    <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
+      {MACD_VALUES.map(v => <option key={v} value={v}>{v}</option>)}
+    </select>
+  </div>
+);
+
+// The Main Rule Builder Component
+function RuleBuilder() {
+  const [rules, setRules] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Form state
+  const [ruleName, setRuleName] = useState('');
+  const [signal, setSignal] = useState('');
+  const [op1, setOp1] = useState({ type: 'indicator', source: 'macd', timeframe: '1m', params: [12, 26, 9], value: 'macd_line', offset: 0 });
+  const [operator, setOperator] = useState('>');
+  const [op2, setOp2] = useState({ type: 'indicator', source: 'macd', timeframe: '1m', params: [12, 26, 9], value: 'signal_line', offset: 0 });
+
+  const fetchRules = async () => {
+    setIsLoading(true);
+    try {
+      const response = await getRules();
+      setRules(response.data);
+    } catch (error) {
+      console.error("Failed to fetch rules:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchRules();
+  }, []);
+
+  const handleSaveRule = async (e) => {
+    e.preventDefault();
+    const ruleJSON = {
+      name: ruleName,
+      signal: signal,
+      groups: [{
+        group_operator: "AND",
+        conditions: [{ operand1: op1, operator: operator, operand2: op2 }]
+      }]
+    };
+
+    try {
+      await saveRule(ruleJSON);
+      alert('Rule saved successfully!');
+      setRuleName('');
+      setSignal('');
+      fetchRules(); // Refresh the list
+    } catch (error) {
+      console.error("Failed to save rule:", error);
+      alert('Failed to save rule.');
+    }
+  };
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">Logic Rule Builder</h1>
+      <form onSubmit={handleSaveRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <input type="text" placeholder="Rule Name (e.g., My BTC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
+          <input type="text" placeholder="Signal on Trigger (e.g., BTC_CROSS_BUY)" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
+        </div>
+
+        <h3 className="text-lg font-semibold mb-2">Condition:</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+          <OperandSelector value={op1} onChange={setOp1} />
+          <select value={operator} onChange={e => setOperator(e.target.value)} className="p-2 border rounded self-center">
+            {OPERATORS.map(op => <option key={op} value={op}>{op}</option>)}
+          </select>
+          <OperandSelector value={op2} onChange={setOp2} />
+        </div>
+
+        <button type="submit" className="mt-6 w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
+          Save New Rule
+        </button>
+      </form>
+
+      <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
+      <div className="bg-white shadow-md rounded-lg p-4">
+        {isLoading ? <p>Loading rules...</p> :
+          <ul>
+            {rules.map(rule => <li key={rule.id} className="border-b p-2">{rule.name} ({rule.signal})</li>)}
+          </ul>
+        }
+      </div>
+    </div>
+  );
+}
+
+export default RuleBuilder;
+
+
+================================================================================
+# 📄 frontend/src/components/Dashboard.jsx
+================================================================================
+
+import { useState, useEffect } from 'react';
+import { getSignals } from '../apiService';
+
+function Dashboard() {
+  const [signals, setSignals] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchSignals = async () => {
+      try {
+        const response = await getSignals();
+        // Transform the response object into an array for easy mapping
+        const signalsArray = Object.entries(response.data).map(([symbol, signal]) => ({
+          symbol,
+          signal,
+        }));
+        setSignals(signalsArray);
+      } catch (error) {
+        console.error('Error fetching signals:', error);
+      } finally {
+        // Set loading to false only after the first fetch
+        if (loading) {
+            setLoading(false);
+        }
+      }
+    };
+
+    fetchSignals(); // Initial fetch
+    const interval = setInterval(fetchSignals, 15000); // Refresh every 15 seconds
+
+    return () => clearInterval(interval); // Cleanup on component unmount
+  }, [loading]); // Rerun effect if loading changes (for initial setup)
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-3xl font-bold text-center mb-6 text-gray-800">
+        Real-Time Crypto Signals 📊
+      </h1>
+      {loading ? (
+        <p className="text-center text-gray-600">Loading signals...</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full bg-white shadow-md rounded-lg">
+            <thead>
+              <tr className="bg-gray-200 text-gray-600 uppercase text-sm leading-normal">
+                <th className="py-3 px-6 text-left">Symbol</th>
+                <th className="py-3 px-6 text-left">Signal</th>
+              </tr>
+            </thead>
+            <tbody className="text-gray-600 text-sm font-light">
+              {signals.map(({ symbol, signal }, index) => (
+                <tr
+                  key={symbol}
+                  className={`border-b border-gray-200 hover:bg-gray-100 ${
+                    index % 2 === 0 ? 'bg-gray-50' : ''
+                  }`}
+                >
+                  <td className="py-3 px-6 text-left whitespace-nowrap font-medium">{symbol}</td>
+                  <td className="py-3 px-6 text-left">
+                    <span
+                      className={`py-1 px-3 rounded-full text-xs font-semibold ${
+                        signal.includes('BUY')
+                          ? 'bg-green-200 text-green-800'
+                          : signal.includes('SELL')
+                          ? 'bg-red-200 text-red-800'
+                          : 'bg-gray-200 text-gray-800'
+                      }`}
+                    >
+                      {signal}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default Dashboard;
 

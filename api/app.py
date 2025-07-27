@@ -1,5 +1,6 @@
 # api/app.py
 
+import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
@@ -19,7 +20,7 @@ CORS(app)
 
 def require_api_key():
     client_key = request.headers.get('X-API-KEY')
-    if client_key != API_KEY:
+    if not API_KEY or client_key != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
@@ -54,7 +55,7 @@ def get_data(ticker: str):
         return auth_error
 
     try:
-        keys = r.keys(f"{ticker}:*")  # type: ignore
+        keys = r.keys(f"{ticker}:*")
         keys: List[bytes] = keys
         
         if not keys:
@@ -64,7 +65,7 @@ def get_data(ticker: str):
         for key in keys:
             key_str = key.decode('utf-8')
             _, interval, params = key_str.split(':')
-            data = r.get(key)  # type: ignore
+            data = r.get(key)
             data: Optional[bytes] = data
             if data:
                 data_list = json.loads(data.decode('utf-8'))
@@ -95,8 +96,11 @@ def get_signals():
     try:
         signals = evaluate_all_tickers()
         return jsonify(signals), 200
-    except Exception as e:
-        return jsonify({"error": f"Failed to evaluate signals: {str(e)}"}), 500
+    except Exception:
+        # This will catch the crash and return the full error traceback
+        error_trace = traceback.format_exc()
+        print(error_trace) # Also print it to the server log
+        return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
