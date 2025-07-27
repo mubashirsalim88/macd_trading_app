@@ -1,10 +1,12 @@
-# api/logic_evaluator.py
+# 📄 api/logic_evaluator.py
+
 from src.redis_client import get_macd_from_redis
 from src.config import CRYPTO_TICKERS
 from api.firestore_client import get_all_rules
 
 def get_operand_value(operand, ticker):
     """Recursively resolves the value of an operand."""
+    if not operand: return None
     if operand['type'] == 'literal':
         return operand['value']
 
@@ -13,8 +15,9 @@ def get_operand_value(operand, ticker):
         redis_data = get_macd_from_redis(ticker, operand['timeframe'], params_dict)
         if not redis_data or len(redis_data) < 3:
             return None
-        # offset: 0=CUR, -1=PAST1, -2=PAST2
-        return redis_data[operand['offset'] - 1][operand['value']]
+        # offset: 0=CUR, -1=PAST1, -2=PAST2. Array is [PAST2, PAST1, CUR] so index is offset + 2
+        # Example: Current (offset 0) -> index 2. Past1 (offset -1) -> index 1.
+        return redis_data[operand['offset'] + 2][operand['value']]
 
     if operand['type'] == 'expression':
         op = operand['operation']
@@ -32,17 +35,15 @@ def get_operand_value(operand, ticker):
 
 def evaluate_single_rule(rule, ticker):
     """Evaluates a full rule with all its conditions for a given ticker."""
-    
-    # ✅ THIS SAFETY CHECK PREVENTS CRASHES FROM BAD DATA
     if 'conditions' not in rule or not isinstance(rule['conditions'], list):
         return False
 
     for condition in rule['conditions']:
-        val1 = get_operand_value(condition['operand1'], ticker)
-        val2 = get_operand_value(condition['operand2'], ticker)
+        val1 = get_operand_value(condition.get('operand1'), ticker)
+        val2 = get_operand_value(condition.get('operand2'), ticker)
 
         if val1 is None or val2 is None:
-            return False # Cannot evaluate if data is missing
+            return False
 
         op = condition['operator']
         
@@ -53,14 +54,18 @@ def evaluate_single_rule(rule, ticker):
         elif op == '<=': is_met = val1 <= val2
         
         if not is_met:
-            return False # If any condition fails, the whole rule fails
+            return False
             
-    return True # All conditions were met
+    return True
 
 def evaluate_all_tickers():
-    """Loads all rules from Firestore and evaluates them against all tickers."""
+    """
+    Loads all rules from Firestore and evaluates them against all tickers.
+    ✅ UPDATED: Returns a more detailed object for each ticker.
+    """
     all_rules = get_all_rules()
-    signals = {ticker: "NO_SIGNAL" for ticker in CRYPTO_TICKERS}
+    # ✅ Initialize with a detailed object, not just a string.
+    signals = {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
 
     if not all_rules:
         return signals
@@ -68,8 +73,10 @@ def evaluate_all_tickers():
     for ticker in CRYPTO_TICKERS:
         for rule in all_rules:
             if evaluate_single_rule(rule, ticker):
-                signals[ticker] = rule['signal']
-                break # Move to the next ticker once a signal is found
+                # ✅ When a rule matches, save the signal AND the rule name.
+                signals[ticker]['signal'] = rule['signal']
+                signals[ticker]['rule_name'] = rule.get('name', 'Unnamed Rule')
+                break  # Move to the next ticker once a signal is found
     
     return signals
 
