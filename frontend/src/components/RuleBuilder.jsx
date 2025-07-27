@@ -1,6 +1,6 @@
 // frontend/src/components/RuleBuilder.jsx
 import { useState, useEffect } from 'react';
-import { getRules, saveRule } from '../apiService';
+import { getRules, saveRule, updateRule, deleteRule } from '../apiService';
 import { TIME_FRAMES, OPERATORS, MACD_VALUES, MACD_PARAMS_BY_TIMEFRAME } from '../config';
 
 const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: '1m', params: [12, 26, 9], value: 'macd_line', offset: 0 };
@@ -10,38 +10,27 @@ const AdvancedOperandSelector = ({ value, onChange }) => {
   if (!value) {
     return <div className="p-2 border rounded bg-gray-200 animate-pulse"></div>;
   }
-
   const isIndicator = value.type === 'indicator';
-
   const handleTypeChange = (e) => {
     const newType = e.target.value;
-    if (newType === 'indicator') {
-      onChange(defaultIndicator);
-    } else {
-      onChange(defaultLiteral);
-    }
+    onChange(newType === 'indicator' ? defaultIndicator : defaultLiteral);
   };
-
   const handleTimeframeChange = (e) => {
     const newTimeframe = e.target.value;
-    // When timeframe changes, reset params to the first valid option for that timeframe
     const newParams = MACD_PARAMS_BY_TIMEFRAME[newTimeframe][0];
     onChange({ ...value, timeframe: newTimeframe, params: newParams });
   };
-
   return (
     <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
       <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
         <option value="indicator">Indicator</option>
         <option value="literal">Number</option>
       </select>
-
       {isIndicator ? (
         <>
           <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
             {TIME_FRAMES.map(tf => <option key={tf} value={tf}>{tf}</option>)}
           </select>
-          {/* ✅ FIX: This dropdown now filters based on the selected timeframe */}
           <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
             {MACD_PARAMS_BY_TIMEFRAME[value.timeframe].map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
           </select>
@@ -55,14 +44,7 @@ const AdvancedOperandSelector = ({ value, onChange }) => {
           </select>
         </>
       ) : (
-        <input 
-          type="number"
-          step="any"
-          value={value.value}
-          onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })}
-          className="p-2 border rounded"
-          placeholder="Enter a number"
-        />
+        <input type="number" step="any" value={value.value} onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })} className="p-2 border rounded" placeholder="Enter a number" />
       )}
     </div>
   );
@@ -73,13 +55,19 @@ function RuleBuilder() {
   const [isLoading, setIsLoading] = useState(true);
   const [ruleName, setRuleName] = useState('');
   const [signal, setSignal] = useState('');
-  const [conditions, setConditions] = useState([
-    {
+  const [conditions, setConditions] = useState([]);
+  const [editingRuleId, setEditingRuleId] = useState(null);
+
+  const resetForm = () => {
+    setRuleName('');
+    setSignal('');
+    setConditions([{
       operand1: { ...defaultIndicator },
       operator: '>',
       operand2: { ...defaultIndicator, value: 'signal_line' }
-    }
-  ]);
+    }]);
+    setEditingRuleId(null);
+  };
 
   const fetchRules = async () => {
     setIsLoading(true);
@@ -94,6 +82,7 @@ function RuleBuilder() {
   };
 
   useEffect(() => {
+    resetForm();
     fetchRules();
   }, []);
 
@@ -104,18 +93,32 @@ function RuleBuilder() {
   };
 
   const addCondition = () => {
-    setConditions([...conditions, {
-      operand1: defaultIndicator,
-      operator: '>',
-      operand2: defaultLiteral
-    }]);
+    setConditions([...conditions, { operand1: defaultIndicator, operator: '>', operand2: defaultLiteral }]);
   };
   
   const removeCondition = (index) => {
     setConditions(conditions.filter((_, i) => i !== index));
   };
 
-  const handleSaveRule = async (e) => {
+  const handleEdit = (rule) => {
+    setEditingRuleId(rule.id);
+    setRuleName(rule.name);
+    setSignal(rule.signal);
+    setConditions(rule.conditions);
+  };
+  
+  const handleDelete = async (ruleId) => {
+    if (window.confirm("Are you sure you want to delete this rule?")) {
+      try {
+        await deleteRule(ruleId);
+        fetchRules();
+      } catch (error) {
+        console.error("Failed to delete rule:", error);
+      }
+    }
+  };
+
+  const handleSaveOrUpdateRule = async (e) => {
     e.preventDefault();
     const ruleJSON = {
       name: ruleName,
@@ -128,28 +131,24 @@ function RuleBuilder() {
     };
 
     try {
-      await saveRule(ruleJSON);
-      alert('Rule saved successfully!');
-      setRuleName('');
-      setSignal('');
-      setConditions([
-        {
-          operand1: { ...defaultIndicator },
-          operator: '>',
-          operand2: { ...defaultIndicator, value: 'signal_line' }
-        }
-      ]);
+      if (editingRuleId) {
+        await updateRule(editingRuleId, ruleJSON);
+        alert('Rule updated successfully!');
+      } else {
+        await saveRule(ruleJSON);
+        alert('Rule saved successfully!');
+      }
+      resetForm();
       fetchRules();
     } catch (error) {
-      console.error("Failed to save rule:", error);
-      alert('Failed to save rule.');
+      console.error("Failed to save/update rule:", error);
     }
   };
 
   return (
     <div className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">Advanced Logic Builder</h1>
-      <form onSubmit={handleSaveRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
+      <h1 className="text-2xl font-bold mb-4">{editingRuleId ? 'Edit Logic Rule' : 'Create Logic Rule'}</h1>
+      <form onSubmit={handleSaveOrUpdateRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
           <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
           <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
@@ -171,16 +170,31 @@ function RuleBuilder() {
           + Add Condition
         </button>
 
-        <button type="submit" className="mt-6 w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
-          Save New Rule
-        </button>
+        <div className="flex items-center mt-6 space-x-4">
+          <button type="submit" className="w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
+            {editingRuleId ? 'Update Rule' : 'Save New Rule'}
+          </button>
+          {editingRuleId && (
+            <button type="button" onClick={resetForm} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">
+              Cancel Edit
+            </button>
+          )}
+        </div>
       </form>
 
       <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
       <div className="bg-white shadow-md rounded-lg p-4">
         {isLoading ? <p>Loading rules...</p> :
           <ul>
-            {rules.map(rule => <li key={rule.id} className="border-b p-2">{rule.name} ({rule.signal})</li>)}
+            {rules.map(rule => (
+              <li key={rule.id} className="border-b p-2 flex justify-between items-center">
+                <span>{rule.name} ({rule.signal})</span>
+                <div>
+                  <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded mr-2 text-sm hover:bg-yellow-600">Edit</button>
+                  <button onClick={() => handleDelete(rule.id)} className="bg-red-500 text-white py-1 px-3 rounded text-sm hover:bg-red-600">Delete</button>
+                </div>
+              </li>
+            ))}
           </ul>
         }
       </div>
