@@ -12,6 +12,9 @@ const apiClient = axios.create({
   }
 });
 
+// ✅ NEW FUNCTION
+export const getConfig = () => apiClient.get('/api/config');
+
 export const getSignals = () => apiClient.get('/api/signals');
 export const getRules = () => apiClient.get('/api/rules');
 export const saveRule = (ruleData) => apiClient.post('/api/rules', ruleData);

@@ -3,6 +3,12 @@
 import pandas as pd
 
 def add_macd(df, fast=12, slow=26, signal=9):
+    # ✅ Check if there's enough data for the calculation
+    # The slow EMA requires the most data, so we check against that.
+    if len(df) <= slow:
+        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
+        return pd.DataFrame() # Return an empty DataFrame to signal failure
+
     if 'Close' not in df.columns:
         print("[Error] 'Close' column not found in DataFrame.")
         return df

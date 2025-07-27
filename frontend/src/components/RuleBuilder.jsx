@@ -1,205 +1,245 @@
 // frontend/src/components/RuleBuilder.jsx
 import { useState, useEffect } from 'react';
-import { getRules, saveRule, updateRule, deleteRule } from '../apiService';
-import { TIME_FRAMES, OPERATORS, MACD_VALUES, MACD_PARAMS_BY_TIMEFRAME } from '../config';
+// ✅ UPDATED: Import getConfig and remove config file imports
+import { getRules, saveRule, updateRule, deleteRule, getConfig } from '../apiService';
 
-const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: '1m', params: [12, 26, 9], value: 'macd_line', offset: 0 };
 const defaultLiteral = { type: 'literal', value: 0 };
 
-const AdvancedOperandSelector = ({ value, onChange }) => {
-  if (!value) {
-    return <div className="p-2 border rounded bg-gray-200 animate-pulse"></div>;
-  }
-  const isIndicator = value.type === 'indicator';
-  const handleTypeChange = (e) => {
-    const newType = e.target.value;
-    onChange(newType === 'indicator' ? defaultIndicator : defaultLiteral);
-  };
-  const handleTimeframeChange = (e) => {
-    const newTimeframe = e.target.value;
-    const newParams = MACD_PARAMS_BY_TIMEFRAME[newTimeframe][0];
-    onChange({ ...value, timeframe: newTimeframe, params: newParams });
-  };
-  return (
-    <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
-      <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
-        <option value="indicator">Indicator</option>
-        <option value="literal">Number</option>
-      </select>
-      {isIndicator ? (
-        <>
-          <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
-            {TIME_FRAMES.map(tf => <option key={tf} value={tf}>{tf}</option>)}
-          </select>
-          <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
-            {MACD_PARAMS_BY_TIMEFRAME[value.timeframe].map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
-          </select>
-          <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
-            {MACD_VALUES.map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-          <select value={value.offset} onChange={e => onChange({ ...value, offset: parseInt(e.target.value, 10) })} className="p-2 border rounded">
-            <option value={0}>Current Candle</option>
-            <option value={-1}>Previous Candle (PAST1)</option>
-            <option value={-2}>2 Candles Ago (PAST2)</option>
-          </select>
-        </>
-      ) : (
-        <input type="number" step="any" value={value.value} onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })} className="p-2 border rounded" placeholder="Enter a number" />
-      )}
-    </div>
-  );
+// ✅ UPDATED: This component now receives the config from its parent
+const AdvancedOperandSelector = ({ value, onChange, config }) => {
+    if (!value || !config) {
+        return <div className="p-2 border rounded bg-gray-200 animate-pulse h-48"></div>;
+    }
+
+    const isIndicator = value.type === 'indicator';
+
+    const handleTypeChange = (e) => {
+        const newType = e.target.value;
+        if (newType === 'indicator') {
+            const defaultTimeframe = config.timeframes[0];
+            const defaultParams = config.macdParamsByTimeframe[defaultTimeframe][0];
+            onChange({ type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 });
+        } else {
+            onChange(defaultLiteral);
+        }
+    };
+
+    const handleTimeframeChange = (e) => {
+        const newTimeframe = e.target.value;
+        // Get the first valid parameter set for the new timeframe
+        const newParams = config.macdParamsByTimeframe[newTimeframe][0];
+        onChange({ ...value, timeframe: newTimeframe, params: newParams });
+    };
+
+    const currentParams = config.macdParamsByTimeframe[value.timeframe] || [];
+
+    return (
+        <div className="flex flex-col space-y-2 p-2 border rounded bg-gray-50">
+            <select value={value.type} onChange={handleTypeChange} className="p-2 border rounded font-semibold">
+                <option value="indicator">Indicator</option>
+                <option value="literal">Number</option>
+            </select>
+            {isIndicator ? (
+                <>
+                    <select value={value.timeframe} onChange={handleTimeframeChange} className="p-2 border rounded">
+                        {config.timeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                    </select>
+                    <select value={value.params.join(',')} onChange={e => onChange({ ...value, params: e.target.value.split(',').map(Number) })} className="p-2 border rounded">
+                        {currentParams.map(p => <option key={p.join(',')} value={p.join(',')}>{p.join(',')}</option>)}
+                    </select>
+                    <select value={value.value} onChange={e => onChange({ ...value, value: e.target.value })} className="p-2 border rounded">
+                        {config.macdValues.map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                    <select value={value.offset} onChange={e => onChange({ ...value, offset: parseInt(e.target.value, 10) })} className="p-2 border rounded">
+                        <option value={0}>Current Candle</option>
+                        <option value={-1}>Previous Candle (PAST1)</option>
+                        <option value={-2}>2 Candles Ago (PAST2)</option>
+                    </select>
+                </>
+            ) : (
+                <input type="number" step="any" value={value.value} onChange={e => onChange({ ...value, value: parseFloat(e.target.value) || 0 })} className="p-2 border rounded" placeholder="Enter a number" />
+            )}
+        </div>
+    );
 };
 
 function RuleBuilder() {
-  const [rules, setRules] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [ruleName, setRuleName] = useState('');
-  const [signal, setSignal] = useState('');
-  const [conditions, setConditions] = useState([]);
-  const [editingRuleId, setEditingRuleId] = useState(null);
+    const [rules, setRules] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
+    // ✅ NEW: State to hold the dynamic config from the API
+    const [appConfig, setAppConfig] = useState(null);
+    
+    const [ruleName, setRuleName] = useState('');
+    const [signal, setSignal] = useState('');
+    const [conditions, setConditions] = useState([]);
+    const [editingRuleId, setEditingRuleId] = useState(null);
 
-  const resetForm = () => {
-    setRuleName('');
-    setSignal('');
-    setConditions([{
-      operand1: { ...defaultIndicator },
-      operator: '>',
-      operand2: { ...defaultIndicator, value: 'signal_line' }
-    }]);
-    setEditingRuleId(null);
-  };
-
-  const fetchRules = async () => {
-    setIsLoading(true);
-    try {
-      const response = await getRules();
-      setRules(response.data);
-    } catch (error) {
-      console.error("Failed to fetch rules:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    resetForm();
-    fetchRules();
-  }, []);
-
-  const handleConditionChange = (index, part, newValue) => {
-    const newConditions = [...conditions];
-    newConditions[index][part] = newValue;
-    setConditions(newConditions);
-  };
-
-  const addCondition = () => {
-    setConditions([...conditions, { operand1: defaultIndicator, operator: '>', operand2: defaultLiteral }]);
-  };
-  
-  const removeCondition = (index) => {
-    setConditions(conditions.filter((_, i) => i !== index));
-  };
-
-  const handleEdit = (rule) => {
-    setEditingRuleId(rule.id);
-    setRuleName(rule.name);
-    setSignal(rule.signal);
-    setConditions(rule.conditions);
-  };
-  
-  const handleDelete = async (ruleId) => {
-    if (window.confirm("Are you sure you want to delete this rule?")) {
-      try {
-        await deleteRule(ruleId);
-        fetchRules();
-      } catch (error) {
-        console.error("Failed to delete rule:", error);
-      }
-    }
-  };
-
-  const handleSaveOrUpdateRule = async (e) => {
-    e.preventDefault();
-    const ruleJSON = {
-      name: ruleName,
-      signal: signal,
-      conditions: conditions.map(c => ({
-        operand1: c.operand1,
-        operator: c.operator,
-        operand2: c.operand2
-      }))
+    // ✅ This function now initializes the form using the dynamic config
+    const resetForm = (config) => {
+        const targetConfig = config || appConfig;
+        setRuleName('');
+        setSignal('');
+        setEditingRuleId(null);
+        if (targetConfig) {
+            const defaultTimeframe = targetConfig.timeframes[0];
+            const defaultParams = targetConfig.macdParamsByTimeframe[defaultTimeframe][0];
+            const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 };
+            setConditions([{
+                operand1: { ...defaultIndicator },
+                operator: targetConfig.operators[0],
+                operand2: { ...defaultIndicator, value: 'signal_line' }
+            }]);
+        }
     };
 
-    try {
-      if (editingRuleId) {
-        await updateRule(editingRuleId, ruleJSON);
-        alert('Rule updated successfully!');
-      } else {
-        await saveRule(ruleJSON);
-        alert('Rule saved successfully!');
-      }
-      resetForm();
-      fetchRules();
-    } catch (error) {
-      console.error("Failed to save/update rule:", error);
-    }
-  };
-
-  return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">{editingRuleId ? 'Edit Logic Rule' : 'Create Logic Rule'}</h1>
-      <form onSubmit={handleSaveOrUpdateRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
-          <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
-        </div>
-
-        <h3 className="text-lg font-semibold mb-2">Conditions (All must be TRUE)</h3>
-        {conditions.map((cond, index) => (
-          <div key={index} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start border-t pt-4 mt-4">
-            <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} />
-            <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="p-2 border rounded self-center">
-              {OPERATORS.map(op => <option key={op} value={op}>{op}</option>)}
-            </select>
-            <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} />
-            <button type="button" onClick={() => removeCondition(index)} className="bg-red-500 text-white p-2 rounded self-center hover:bg-red-600">Remove</button>
-          </div>
-        ))}
-        
-        <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">
-          + Add Condition
-        </button>
-
-        <div className="flex items-center mt-6 space-x-4">
-          <button type="submit" className="w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
-            {editingRuleId ? 'Update Rule' : 'Save New Rule'}
-          </button>
-          {editingRuleId && (
-            <button type="button" onClick={resetForm} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">
-              Cancel Edit
-            </button>
-          )}
-        </div>
-      </form>
-
-      <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
-      <div className="bg-white shadow-md rounded-lg p-4">
-        {isLoading ? <p>Loading rules...</p> :
-          <ul>
-            {rules.map(rule => (
-              <li key={rule.id} className="border-b p-2 flex justify-between items-center">
-                <span>{rule.name} ({rule.signal})</span>
-                <div>
-                  <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded mr-2 text-sm hover:bg-yellow-600">Edit</button>
-                  <button onClick={() => handleDelete(rule.id)} className="bg-red-500 text-white py-1 px-3 rounded text-sm hover:bg-red-600">Delete</button>
-                </div>
-              </li>
-            ))}
-          </ul>
+    const fetchInitialData = async () => {
+        setIsLoading(true);
+        try {
+            const configRes = await getConfig();
+            setAppConfig(configRes.data);
+            const rulesRes = await getRules();
+            setRules(rulesRes.data);
+            resetForm(configRes.data); // Reset form once config is loaded
+        } catch (error) {
+            console.error("Failed to fetch initial data:", error);
+        } finally {
+            setIsLoading(false);
         }
-      </div>
-    </div>
-  );
+    };
+    
+    useEffect(() => {
+        fetchInitialData();
+    }, []);
+
+    const fetchRules = async () => {
+        try {
+            const response = await getRules();
+            setRules(response.data);
+        } catch (error) {
+            console.error("Failed to fetch rules:", error);
+        }
+    };
+
+    const handleConditionChange = (index, part, newValue) => {
+        const newConditions = [...conditions];
+        newConditions[index][part] = newValue;
+        setConditions(newConditions);
+    };
+
+    const addCondition = () => {
+        const defaultTimeframe = appConfig.timeframes[0];
+        const defaultParams = appConfig.macdParamsByTimeframe[defaultTimeframe][0];
+        const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 };
+        setConditions([...conditions, { operand1: defaultIndicator, operator: appConfig.operators[0], operand2: defaultLiteral }]);
+    };
+    
+    const removeCondition = (index) => {
+        setConditions(conditions.filter((_, i) => i !== index));
+    };
+
+    const handleEdit = (rule) => {
+        setEditingRuleId(rule.id);
+        setRuleName(rule.name);
+        setSignal(rule.signal);
+        setConditions(rule.conditions);
+    };
+    
+    const handleDelete = async (ruleId) => {
+        if (window.confirm("Are you sure you want to delete this rule?")) {
+            try {
+                await deleteRule(ruleId);
+                fetchRules();
+            } catch (error) {
+                console.error("Failed to delete rule:", error);
+            }
+        }
+    };
+
+    const handleSaveOrUpdateRule = async (e) => {
+        e.preventDefault();
+        const ruleJSON = {
+            name: ruleName,
+            signal: signal,
+            conditions: conditions
+        };
+
+        try {
+            if (editingRuleId) {
+                await updateRule(editingRuleId, ruleJSON);
+                alert('Rule updated successfully!');
+            } else {
+                await saveRule(ruleJSON);
+                alert('Rule saved successfully!');
+            }
+            resetForm();
+            fetchRules();
+        } catch (error) {
+            console.error("Failed to save/update rule:", error);
+        }
+    };
+
+    // ✅ UPDATED: Show a loading state until the config is fetched
+    if (isLoading || !appConfig) {
+        return <div className="container mx-auto p-4 text-center">Loading configuration and rules...</div>;
+    }
+
+    return (
+        <div className="container mx-auto p-4">
+            <h1 className="text-2xl font-bold mb-4">{editingRuleId ? 'Edit Logic Rule' : 'Create Logic Rule'}</h1>
+            <form onSubmit={handleSaveOrUpdateRule} className="bg-white shadow-md rounded-lg p-6 mb-8">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-2 border rounded" />
+                    <input type="text" placeholder="Signal on Trigger (e.g., L33BC(BUY))" value={signal} onChange={e => setSignal(e.target.value)} required className="p-2 border rounded" />
+                </div>
+
+                <h3 className="text-lg font-semibold mb-2">Conditions (All must be TRUE)</h3>
+                {conditions.map((cond, index) => (
+                    <div key={index} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start border-t pt-4 mt-4">
+                        {/* ✅ UPDATED: Pass the appConfig to the selector */}
+                        <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
+                        <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="p-2 border rounded self-center">
+                            {/* ✅ UPDATED: Use operators from the config */}
+                            {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
+                        </select>
+                        <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} config={appConfig} />
+                        <button type="button" onClick={() => removeCondition(index)} className="bg-red-500 text-white p-2 rounded self-center hover:bg-red-600">Remove</button>
+                    </div>
+                ))}
+                
+                <button type="button" onClick={addCondition} className="mt-4 bg-gray-200 text-gray-800 p-2 rounded hover:bg-gray-300">
+                    + Add Condition
+                </button>
+
+                <div className="flex items-center mt-6 space-x-4">
+                    <button type="submit" className="w-full bg-blue-500 text-white p-3 rounded font-semibold hover:bg-blue-600">
+                        {editingRuleId ? 'Update Rule' : 'Save New Rule'}
+                    </button>
+                    {editingRuleId && (
+                        <button type="button" onClick={() => resetForm()} className="w-full bg-gray-500 text-white p-3 rounded font-semibold hover:bg-gray-600">
+                            Cancel Edit
+                        </button>
+                    )}
+                </div>
+            </form>
+
+            <h2 className="text-xl font-bold mb-4">Saved Rules</h2>
+            <div className="bg-white shadow-md rounded-lg p-4">
+                {rules.length === 0 ? <p>No rules saved yet.</p> :
+                    <ul>
+                        {rules.map(rule => (
+                            <li key={rule.id} className="border-b p-2 flex justify-between items-center">
+                                <span>{rule.name} ({rule.signal})</span>
+                                <div>
+                                    <button onClick={() => handleEdit(rule)} className="bg-yellow-500 text-white py-1 px-3 rounded mr-2 text-sm hover:bg-yellow-600">Edit</button>
+                                    <button onClick={() => handleDelete(rule.id)} className="bg-red-500 text-white py-1 px-3 rounded text-sm hover:bg-red-600">Delete</button>
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
+                }
+            </div>
+        </div>
+    );
 }
 
 export default RuleBuilder;

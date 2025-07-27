@@ -8,6 +8,8 @@ import json
 import os
 from dotenv import load_dotenv
 from typing import List, Optional
+# ✅ ADDED: Import MACD_PARAMS to use in the new config endpoint
+from src.config import MACD_PARAMS
 
 # Load API key from environment
 load_dotenv()
@@ -25,6 +27,39 @@ def require_api_key():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok", "message": "API is running"})
+
+# ✅ NEW ENDPOINT
+@app.route('/api/config', methods=['GET'])
+def get_app_config():
+    """
+    Provides the frontend with dynamic configuration, including only the
+    MACD parameters that can be calculated with 7 days of data.
+    """
+    # Define how many candles are in the 7-day period for each interval
+    CANDLES_IN_7_DAYS = {
+        '1m': 60 * 24 * 7,   # 10,080 candles
+        '5m': 12 * 24 * 7,   #  2,016 candles
+        '15m': 4 * 24 * 7    #    672 candles
+    }
+
+    # Filter the MACD params to only include ones that are possible to calculate
+    valid_params = {}
+    for timeframe, params_list in MACD_PARAMS.items():
+        max_candles = CANDLES_IN_7_DAYS.get(timeframe, 0)
+        # Keep a param set only if its 'slow' value (p[1]) is less than the available candles
+        valid_params[timeframe] = [
+            p for p in params_list if p[1] < max_candles
+        ]
+
+    # This config will be sent to the frontend
+    frontend_config = {
+        'timeframes': list(MACD_PARAMS.keys()),
+        'operators': ['>', '<', '>=', '<='],
+        'macdValues': ['macd_line', 'signal_line', 'histogram'],
+        'macdParamsByTimeframe': valid_params
+    }
+    return jsonify(frontend_config)
+
 
 @app.route('/api/rules', methods=['POST'])
 def create_rule():
