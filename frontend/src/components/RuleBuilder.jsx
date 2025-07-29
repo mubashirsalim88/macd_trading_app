@@ -19,7 +19,10 @@ const defaultLiteral = { type: 'literal', value: 0 };
 
 const AdvancedOperandSelector = ({ value, onChange, config }) => {
     if (!value || !config) {
-        return <div className="p-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-dark-primary)] animate-pulse h-52"></div>;
+        // IMPROVEMENT: More prominent loading state for operands
+        return <div className="p-4 border border-[var(--border-color)] rounded-lg bg-[var(--bg-dark-primary)] animate-pulse h-52 flex items-center justify-center text-[var(--text-secondary)]">
+            Loading operand options...
+        </div>;
     }
     const isIndicator = value.type === 'indicator';
     const handleTypeChange = (e) => {
@@ -221,8 +224,9 @@ function RuleBuilder() {
             <div className="flex justify-between items-center mb-8">
                 {/* ✅ CHANGED: Responsive text size */}
                 <h1 className="text-3xl md:text-4xl font-extrabold text-white">Logic Engine</h1>
+                {/* IMPROVEMENT: Hide "Create New Logic" button when form is visible */}
                 {!isFormVisible && (
-                    <button onClick={handleAddNewClick} className="bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-2 px-4 rounded-lg shadow-lg transition-colors">
+                    <button onClick={handleAddNewClick} className="bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-2 px-4 rounded-lg shadow-lg transition-colors whitespace-nowrap">
                         + Create New Logic
                     </button>
                 )}
@@ -236,6 +240,7 @@ function RuleBuilder() {
                     </div>
 
                     <form onSubmit={handleSaveOrUpdateRule}>
+                        {/* IMPROVEMENT: Ensure input fields stack nicely on mobile */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                             <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]" />
                             <input type="text" placeholder="Signal on Trigger (e.g., L33BC_BUY)" value={signal} onChange={e => setSignal(e.target.value)} required className="p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]" />
@@ -243,17 +248,20 @@ function RuleBuilder() {
                         <h3 className="text-lg font-semibold mb-2 text-gray-300">Conditions (All must be TRUE)</h3>
                         <div className="space-y-4">{conditions.map((cond, index) => (
                             // ✅ CHANGED: From a complex grid to a responsive flex layout
+                            // IMPROVEMENT: Ensure operands and operator stack on mobile, then go horizontal on larger screens
                             <div key={index} className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center bg-[var(--bg-dark-secondary)] p-4 rounded-lg border border-[var(--border-color)]">
                                 <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
-                                <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="w-full lg:w-auto p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)] font-mono text-lg">
+                                {/* IMPROVEMENT: Operator takes full width on mobile, then auto-width on larger screens */}
+                                <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="w-full lg:w-auto p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)] font-mono text-lg text-center">
                                     {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
                                 </select>
                                 <AdvancedOperandSelector value={cond.operand2} onChange={(val) => handleConditionChange(index, 'operand2', val)} config={appConfig} />
-                                <button type="button" onClick={() => removeCondition(index)} className="bg-red-600/20 text-red-400 p-2 rounded-full hover:bg-red-500 hover:text-white transition-colors self-center"><CloseIcon /></button>
+                                <button type="button" onClick={() => removeCondition(index)} className="bg-red-600/20 text-red-400 p-2 rounded-full hover:bg-red-500 hover:text-white transition-colors self-center flex-shrink-0"><CloseIcon /></button>
                             </div>
                         ))}</div>
                         <button type="button" onClick={addCondition} className="mt-4 text-sm text-[var(--accent-primary)] hover:underline">+ Add Condition</button>
-                        <div className="flex items-center mt-6 border-t border-[var(--border-color)] pt-6 space-x-4">
+                        {/* IMPROVEMENT: Buttons stack on mobile, then go side-by-side on small screens+ */}
+                        <div className="flex flex-col sm:flex-row items-stretch gap-4 mt-6 border-t border-[var(--border-color)] pt-6">
                             <button type="submit" disabled={isSaving} className="flex-grow bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-3 px-4 rounded-lg shadow-lg transition-colors flex items-center justify-center disabled:opacity-50">
                                 {isSaving ? <><Spinner /><span>Saving...</span></> : (editingRuleId ? 'Update Rule' : 'Save New Rule')}
                             </button>
@@ -269,23 +277,25 @@ function RuleBuilder() {
                     <ul>{rules.map(rule => (
                         // ✅ CHANGED: Main list item now stacks vertically on mobile
                         <li key={rule.id} className={`border-b border-[var(--border-color)] p-4 flex flex-col sm:flex-row sm:justify-between sm:items-center hover:bg-[var(--bg-dark-primary)] transition-colors ${deletingId === rule.id ? 'opacity-50' : ''}`}>
-                            <div>
-                                <span className="font-bold text-lg text-white">{rule.name}</span>
-                                <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded">{rule.signal}</span>
+                            {/* IMPROVEMENT: Ensure rule name and signal stay on one line or wrap gracefully */}
+                            <div className="mb-2 sm:mb-0">
+                                <span className="font-bold text-lg text-white break-words">{rule.name}</span>
+                                <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded whitespace-nowrap">{rule.signal}</span>
                             </div>
                             {/* ✅ CHANGED: Action buttons now stack on mobile and have better spacing */}
+                            {/* IMPROVEMENT: Telegram toggle and action buttons stack on mobile, then go horizontal on small screens+ */}
                             <div className="flex flex-col items-stretch gap-3 mt-4 sm:flex-row sm:items-center sm:gap-4 sm:mt-0">
                                 <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between sm:justify-start cursor-pointer">
-                                    <span className="mr-3 text-sm text-[var(--text-secondary)]">Telegram Alert</span>
+                                    <span className="mr-3 text-sm text-[var(--text-secondary)] whitespace-nowrap">Telegram Alert</span>
                                     <div className="relative">
                                         <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)} disabled={deletingId === rule.id}/>
                                         <div className="block bg-gray-600 w-10 h-6 rounded-full"></div>
                                         <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
                                     </div>
                                 </label>
-                                <button onClick={() => handleEditClick(rule)} className="text-center sm:text-left text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>Edit</button>
+                                <button onClick={() => handleEditClick(rule)} className="text-center sm:text-left text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap" disabled={deletingId === rule.id}>Edit</button>
                                 {/* ✅ CHANGED: Removed fixed width 'w-24' for better flexibility */}
-                                <button onClick={() => handleDelete(rule.id)} className="text-center sm:text-left text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>
+                                <button onClick={() => handleDelete(rule.id)} className="text-center sm:text-left text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap" disabled={deletingId === rule.id}>
                                     {deletingId === rule.id ? 'Deleting...' : 'Delete'}
                                 </button>
                             </div>

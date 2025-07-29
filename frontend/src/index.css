@@ -8,15 +8,15 @@
   --bg-dark-primary: #121212;      /* Deepest background */
   --bg-dark-secondary: #1E1E1E;    /* Card/container backgrounds */
   --border-color: #333333;        /* Borders and dividers */
-  
+
   --text-primary: #EAEAEA;         /* Primary text */
   --text-secondary: #A0A0A0;      /* Softer, secondary text */
-  
+
   --accent-buy: #22c55e;           /* Green for BUY signals */
   --accent-buy-bg: rgba(34, 197, 94, 0.1);
   --accent-sell: #ef4444;          /* Red for SELL signals */
   --accent-sell-bg: rgba(239, 68, 68, 0.1);
-  
+
   --accent-primary: #3b82f6;      /* Blue for primary buttons/actions */
   --accent-primary-hover: #2563eb;
 }
@@ -26,10 +26,15 @@
 @tailwind utilities;
 
 /* Apply base styles to the body */
+html {
+  font-size: 16px; /* Base font size for rem units */
+}
+
 body {
   background-color: var(--bg-dark-primary);
   color: var(--text-primary);
   font-family: 'Inter', sans-serif;
+  min-width: 320px; /* Prevent layout issues on very small screens */
 }
 
 /* Custom styling for the Telegram toggle switch we created */

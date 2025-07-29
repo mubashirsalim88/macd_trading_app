@@ -63,7 +63,7 @@ function Dashboard() {
     return (
         <div className="container mx-auto p-4 md:p-6">
             <div className="text-center mb-6">
-                 {/* ✅ CHANGED: Responsive text size for consistency */}
+                     {/* ✅ CHANGED: Responsive text size for consistency */}
                 <h1 className="text-3xl md:text-4xl font-extrabold text-white">Signal Dashboard</h1>
                 <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
                     {isRefreshing && <RefreshSpinner />}
@@ -73,8 +73,10 @@ function Dashboard() {
 
             <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
                 {/* This responsive pattern is already great for mobile */}
+                {/* IMPROVEMENT: Ensure filters stack on mobile, then go horizontal on small screens+ */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                    <div className="flex items-center flex-wrap gap-2">
+                    {/* IMPROVEMENT: Filter buttons wrap if needed */}
+                    <div className="flex items-center flex-wrap gap-2 justify-center sm:justify-start">
                         <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
                         <button
                             onClick={() => setActiveRuleFilter('all')}
@@ -91,7 +93,7 @@ function Dashboard() {
                         ))}
                     </div>
 
-                    <label htmlFor="showNoSignal" className="flex items-center cursor-pointer">
+                    <label htmlFor="showNoSignal" className="flex items-center cursor-pointer mt-4 sm:mt-0">
                         <span className="mr-3 text-sm text-[var(--text-secondary)]">Show 'NO_SIGNAL'</span>
                         <div className="relative">
                             <input type="checkbox" id="showNoSignal" className="sr-only" checked={showNoSignal} onChange={e => setShowNoSignal(e.target.checked)} />

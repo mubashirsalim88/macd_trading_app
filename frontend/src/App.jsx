@@ -14,7 +14,7 @@ function App() {
       <nav className="bg-[var(--bg-dark-secondary)] border-b border-[var(--border-color)] shadow-lg">
         <div className="container mx-auto px-4">
           <div className="flex items-center justify-between h-16">
-            
+
             {/* NNTE Branding Section */}
             <div className="flex items-center space-x-3">
               <div className="bg-blue-600 p-2 rounded-lg">
@@ -22,7 +22,8 @@ function App() {
               </div>
               <div className="flex flex-col">
                 <span className="font-extrabold text-xl text-white tracking-wider">NNTE</span>
-                <span className="text-xs text-[var(--text-secondary)] hidden sm:block">Neural Network Traders Empire</span>
+                {/* IMPROVEMENT: Hide descriptive text on smaller screens */}
+                <span className="text-xs text-[var(--text-secondary)] hidden">Neural Network Traders Empire</span>
               </div>
             </div>
 
@@ -38,7 +39,7 @@ function App() {
           </div>
         </div>
       </nav>
-      
+
       <main>
         <Routes>
           <Route path="/" element={<Dashboard />} />
