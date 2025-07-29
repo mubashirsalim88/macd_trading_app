@@ -277,15 +277,14 @@ function RuleBuilder() {
                     <ul>{rules.map(rule => (
                         // ✅ CHANGED: Main list item now stacks vertically on mobile
                         <li key={rule.id} className={`border-b border-[var(--border-color)] p-4 flex flex-col sm:flex-row sm:justify-between sm:items-center hover:bg-[var(--bg-dark-primary)] transition-colors ${deletingId === rule.id ? 'opacity-50' : ''}`}>
-                            {/* IMPROVEMENT: Ensure rule name and signal stay on one line or wrap gracefully */}
-                            <div className="mb-2 sm:mb-0">
+                            {/* IMPROVEMENT: Ensure rule name and signal stack on mobile */}
+                            <div className="mb-2 sm:mb-0 flex flex-col items-start sm:flex-row sm:items-baseline sm:gap-2">
                                 <span className="font-bold text-lg text-white break-words">{rule.name}</span>
-                                <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded whitespace-nowrap">{rule.signal}</span>
+                                <span className="text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded whitespace-nowrap block sm:inline-block">{rule.signal}</span>
                             </div>
-                            {/* ✅ CHANGED: Action buttons now stack on mobile and have better spacing */}
-                            {/* IMPROVEMENT: Telegram toggle and action buttons stack on mobile, then go horizontal on small screens+ */}
-                            <div className="flex flex-col items-stretch gap-3 mt-4 sm:flex-row sm:items-center sm:gap-4 sm:mt-0">
-                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between sm:justify-start cursor-pointer">
+                            {/* IMPROVEMENT: Telegram toggle and action buttons stack on mobile */}
+                            <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:gap-4 mt-4 sm:mt-0">
+                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between cursor-pointer w-full sm:w-auto">
                                     <span className="mr-3 text-sm text-[var(--text-secondary)] whitespace-nowrap">Telegram Alert</span>
                                     <div className="relative">
                                         <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)} disabled={deletingId === rule.id}/>
@@ -293,9 +292,8 @@ function RuleBuilder() {
                                         <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
                                     </div>
                                 </label>
-                                <button onClick={() => handleEditClick(rule)} className="text-center sm:text-left text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap" disabled={deletingId === rule.id}>Edit</button>
-                                {/* ✅ CHANGED: Removed fixed width 'w-24' for better flexibility */}
-                                <button onClick={() => handleDelete(rule.id)} className="text-center sm:text-left text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap" disabled={deletingId === rule.id}>
+                                <button onClick={() => handleEditClick(rule)} className="text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap w-full sm:w-auto">Edit</button>
+                                <button onClick={() => handleDelete(rule.id)} className="text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap w-full sm:w-auto">
                                     {deletingId === rule.id ? 'Deleting...' : 'Delete'}
                                 </button>
                             </div>
