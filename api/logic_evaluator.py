@@ -1,9 +1,30 @@
+# api/logic_evaluator.py
+
 from src.redis_client import get_macd_from_redis
 from src.config import CRYPTO_TICKERS
 from api.firestore_client import get_all_rules
-
-# ✅ NEW: Import Telegram message function
 from api.notifications import send_telegram_message
+import json
+from src.redis_client import r # Import the redis client
+
+# --- THIS IS A NEW FUNCTION ---
+def save_signals_to_redis(signals):
+    """Saves the latest evaluated signals to a single key in Redis."""
+    try:
+        r.set('latest_signals', json.dumps(signals))
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to save latest signals: {e}")
+
+# --- THIS IS A NEW FUNCTION ---
+def get_signals_from_redis():
+    """Retrieves the latest signals from Redis."""
+    try:
+        signals = r.get('latest_signals')
+        if signals:
+            return json.loads(signals.decode('utf-8'))
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to get latest signals: {e}")
+    return {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
 
 
 def get_operand_value(operand, ticker):
@@ -68,28 +89,38 @@ def evaluate_single_rule(rule, ticker):
     return True
 
 
-def evaluate_all_tickers():
+# --- THIS FUNCTION IS MODIFIED ---
+def evaluate_all_tickers(send_notifications=False):
     """
-    Loads all rules from Firestore and evaluates them against all tickers.
-    ✅ UPDATED: Sends Telegram alert if a rule requires it.
+    Loads all rules and evaluates them.
+    If send_notifications is True, it will send Telegram alerts.
     """
     all_rules = get_all_rules()
     signals = {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
+    
+    # Get previous signals to avoid re-sending alerts
+    previous_signals = get_signals_from_redis()
 
     if not all_rules:
+        save_signals_to_redis(signals)
         return signals
 
     for ticker in CRYPTO_TICKERS:
         for rule in all_rules:
             if evaluate_single_rule(rule, ticker):
-                signals[ticker]['signal'] = rule['signal']
-                signals[ticker]['rule_name'] = rule.get('name', 'Unnamed Rule')
+                current_signal = rule['signal']
+                current_rule_name = rule.get('name', 'Unnamed Rule')
 
-                # ✅ NEW: Send Telegram message if rule has notifications enabled
-                if rule.get('telegram_enabled', False):
-                    rule_name_safe = rule.get('name', 'Unnamed Rule').replace('-', '\\-').replace('.', '\\.')
+                signals[ticker]['signal'] = current_signal
+                signals[ticker]['rule_name'] = current_rule_name
+
+                # Check if this is a NEW signal before sending an alert
+                previous_ticker_signal = previous_signals.get(ticker, {}).get('signal', 'NO_SIGNAL')
+                
+                if send_notifications and rule.get('telegram_enabled', False) and current_signal != previous_ticker_signal:
+                    rule_name_safe = current_rule_name.replace('-', '\\-').replace('.', '\\.')
                     ticker_safe = ticker.replace('-', '\\-')
-                    signal_safe = rule['signal'].replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
+                    signal_safe = current_signal.replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
 
                     message = (
                         f"🚨 *NNTE Signal Alert* 🚨\n\n"
@@ -98,14 +129,16 @@ def evaluate_all_tickers():
                         f"*Rule:* `{rule_name_safe}`"
                     )
                     send_telegram_message(message)
+                
+                break
 
-                break  # Only apply the first matching rule per ticker
-
+    # Always save the latest signals after evaluation
+    save_signals_to_redis(signals)
     return signals
 
 
 def debug_single_rule(rule, ticker):
-    """Provides a detailed step-by-step evaluation of a rule for debugging."""
+    # This function remains unchanged
     if 'id' not in rule:
         return {"error": "Rule has no ID"}
 

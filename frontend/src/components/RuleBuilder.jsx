@@ -1,3 +1,5 @@
+// frontend/src/components/RuleBuilder.jsx
+
 import { useState, useEffect, useCallback } from 'react';
 import { getRules, saveRule, updateRule, deleteRule, getConfig } from '../apiService';
 
@@ -16,7 +18,6 @@ const Spinner = () => (
 const defaultLiteral = { type: 'literal', value: 0 };
 
 const AdvancedOperandSelector = ({ value, onChange, config }) => {
-    // This component's code remains unchanged
     if (!value || !config) {
         return <div className="p-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-dark-primary)] animate-pulse h-52"></div>;
     }
@@ -75,10 +76,9 @@ function RuleBuilder() {
     const [isLoading, setIsLoading] = useState(true);
     const [appConfig, setAppConfig] = useState(null);
     const [isFormVisible, setIsFormVisible] = useState(false);
-    
+
     const [isSaving, setIsSaving] = useState(false);
     const [toastMessage, setToastMessage] = useState('');
-    // ✅ NEW: State to track which rule is being deleted
     const [deletingId, setDeletingId] = useState(null);
 
     const [ruleName, setRuleName] = useState('');
@@ -108,13 +108,14 @@ function RuleBuilder() {
         resetForm(appConfig);
         setIsFormVisible(true);
     };
-    
+
     const handleEditClick = (rule) => {
         setEditingRuleId(rule.id);
         setRuleName(rule.name);
         setSignal(rule.signal);
         setConditions(rule.conditions);
         setIsFormVisible(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll to top to see form on mobile
     };
 
     const handleCancel = () => {
@@ -129,7 +130,7 @@ function RuleBuilder() {
                 const [configRes, rulesRes] = await Promise.all([getConfig(), getRules()]);
                 setAppConfig(configRes.data);
                 setRules(rulesRes.data);
-                resetForm(configRes.data); 
+                resetForm(configRes.data);
             } catch (error) {
                 console.error("Failed to fetch initial data:", error);
             } finally {
@@ -146,7 +147,7 @@ function RuleBuilder() {
             setRules(response.data);
         } catch (error) { console.error("Failed to fetch rules:", error); }
     };
-    
+
     const handleTelegramToggle = async (ruleToUpdate) => {
         const updatedRule = { ...ruleToUpdate, telegram_enabled: !ruleToUpdate.telegram_enabled };
         setRules(currentRules => currentRules.map(r => r.id === updatedRule.id ? updatedRule : r));
@@ -169,7 +170,7 @@ function RuleBuilder() {
 
     const handleDelete = async (ruleId) => {
         if (window.confirm("Are you sure you want to permanently delete this rule?")) {
-            setDeletingId(ruleId); // ✅ Start deleting state
+            setDeletingId(ruleId);
             try {
                 await deleteRule(ruleId);
                 showToast('Logic deleted successfully!');
@@ -178,7 +179,7 @@ function RuleBuilder() {
                 console.error("Failed to delete rule:", error);
                 alert("Could not delete rule. Please try again.");
             } finally {
-                setDeletingId(null); // ✅ End deleting state
+                setDeletingId(null);
             }
         }
     };
@@ -218,7 +219,8 @@ function RuleBuilder() {
         <div className="container mx-auto p-4 md:p-6">
             <Toast message={toastMessage} show={!!toastMessage} />
             <div className="flex justify-between items-center mb-8">
-                <h1 className="text-4xl font-extrabold text-white">Logic Engine</h1>
+                {/* ✅ CHANGED: Responsive text size */}
+                <h1 className="text-3xl md:text-4xl font-extrabold text-white">Logic Engine</h1>
                 {!isFormVisible && (
                     <button onClick={handleAddNewClick} className="bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-2 px-4 rounded-lg shadow-lg transition-colors">
                         + Create New Logic
@@ -232,7 +234,7 @@ function RuleBuilder() {
                         <h2 className="text-2xl font-bold">{editingRuleId ? 'Edit Logic' : 'Create New Logic'}</h2>
                         <button onClick={handleCancel} className="text-[var(--text-secondary)] hover:text-white"><CloseIcon /></button>
                     </div>
-                    
+
                     <form onSubmit={handleSaveOrUpdateRule}>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                             <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]" />
@@ -240,7 +242,8 @@ function RuleBuilder() {
                         </div>
                         <h3 className="text-lg font-semibold mb-2 text-gray-300">Conditions (All must be TRUE)</h3>
                         <div className="space-y-4">{conditions.map((cond, index) => (
-                            <div key={index} className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr_auto] gap-4 items-center bg-[var(--bg-dark-secondary)] p-4 rounded-lg border border-[var(--border-color)]">
+                            // ✅ CHANGED: From a complex grid to a responsive flex layout
+                            <div key={index} className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center bg-[var(--bg-dark-secondary)] p-4 rounded-lg border border-[var(--border-color)]">
                                 <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
                                 <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="w-full lg:w-auto p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)] font-mono text-lg">
                                     {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
@@ -259,18 +262,20 @@ function RuleBuilder() {
                     </form>
                 </div>
             )}
-            
+
             <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] rounded-xl shadow-lg">
                 <h3 className="text-xl font-bold p-4 border-b border-[var(--border-color)]">Saved Logic Library</h3>
                 {rules.length === 0 ? <p className="p-4 text-[var(--text-secondary)]">No logic saved yet. Click 'Create New Logic' to begin.</p> :
                     <ul>{rules.map(rule => (
-                        <li key={rule.id} className={`border-b border-[var(--border-color)] p-4 flex justify-between items-center hover:bg-[var(--bg-dark-primary)] transition-colors ${deletingId === rule.id ? 'opacity-50' : ''}`}>
+                        // ✅ CHANGED: Main list item now stacks vertically on mobile
+                        <li key={rule.id} className={`border-b border-[var(--border-color)] p-4 flex flex-col sm:flex-row sm:justify-between sm:items-center hover:bg-[var(--bg-dark-primary)] transition-colors ${deletingId === rule.id ? 'opacity-50' : ''}`}>
                             <div>
                                 <span className="font-bold text-lg text-white">{rule.name}</span>
                                 <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded">{rule.signal}</span>
                             </div>
-                            <div className="flex items-center space-x-4">
-                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center cursor-pointer">
+                            {/* ✅ CHANGED: Action buttons now stack on mobile and have better spacing */}
+                            <div className="flex flex-col items-stretch gap-3 mt-4 sm:flex-row sm:items-center sm:gap-4 sm:mt-0">
+                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between sm:justify-start cursor-pointer">
                                     <span className="mr-3 text-sm text-[var(--text-secondary)]">Telegram Alert</span>
                                     <div className="relative">
                                         <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)} disabled={deletingId === rule.id}/>
@@ -278,8 +283,9 @@ function RuleBuilder() {
                                         <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
                                     </div>
                                 </label>
-                                <button onClick={() => handleEditClick(rule)} className="text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>Edit</button>
-                                <button onClick={() => handleDelete(rule.id)} className="text-red-500 hover:text-red-400 font-semibold w-24 text-center disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>
+                                <button onClick={() => handleEditClick(rule)} className="text-center sm:text-left text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>Edit</button>
+                                {/* ✅ CHANGED: Removed fixed width 'w-24' for better flexibility */}
+                                <button onClick={() => handleDelete(rule.id)} className="text-center sm:text-left text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>
                                     {deletingId === rule.id ? 'Deleting...' : 'Delete'}
                                 </button>
                             </div>

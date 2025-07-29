@@ -15,16 +15,14 @@ function Dashboard() {
     const [signals, setSignals] = useState([]);
     const [rules, setRules] = useState([]);
     const [initialLoading, setInitialLoading] = useState(true);
-    // ✅ NEW: State for the silent refresh indicator
     const [isRefreshing, setIsRefreshing] = useState(false);
-    
+
     const [activeRuleFilter, setActiveRuleFilter] = useState('all');
     const [showNoSignal, setShowNoSignal] = useState(false);
     const [lastUpdated, setLastUpdated] = useState(new Date());
 
     useEffect(() => {
         const fetchAllData = async () => {
-            // Only use the main loading state on the very first run
             if (!initialLoading) {
                 setIsRefreshing(true);
             }
@@ -50,7 +48,7 @@ function Dashboard() {
         fetchAllData();
         const interval = setInterval(fetchAllData, 15000);
         return () => clearInterval(interval);
-    }, []); // This dependency array is intentionally empty to control loading states manually
+    }, [initialLoading]); // Changed dependency to re-run only on initial load state change
 
     const filteredSignals = signals.filter(s => {
         const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
@@ -65,25 +63,26 @@ function Dashboard() {
     return (
         <div className="container mx-auto p-4 md:p-6">
             <div className="text-center mb-6">
-                <h1 className="text-4xl font-extrabold text-white">Signal Dashboard</h1>
+                 {/* ✅ CHANGED: Responsive text size for consistency */}
+                <h1 className="text-3xl md:text-4xl font-extrabold text-white">Signal Dashboard</h1>
                 <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
                     {isRefreshing && <RefreshSpinner />}
                     <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
                 </div>
             </div>
 
-            {/* ✅ REDESIGNED FILTER BAR */}
             <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
+                {/* This responsive pattern is already great for mobile */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
                     <div className="flex items-center flex-wrap gap-2">
                         <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
-                        <button 
+                        <button
                             onClick={() => setActiveRuleFilter('all')}
                             className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
                             All Signals
                         </button>
                         {rules.map(rule => (
-                            <button 
+                            <button
                                 key={rule.id}
                                 onClick={() => setActiveRuleFilter(rule.name)}
                                 className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === rule.name ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
@@ -110,7 +109,7 @@ function Dashboard() {
                     const signalColorClass = isBuy ? 'text-[var(--accent-buy)]' : isSell ? 'text-[var(--accent-sell)]' : 'text-[var(--text-secondary)]';
                     const signalBgClass = isBuy ? 'bg-[var(--accent-buy-bg)]' : isSell ? 'bg-[var(--accent-sell-bg)]' : 'bg-gray-700/20';
                     const borderColorClass = isBuy ? 'border-[var(--accent-buy)]' : isSell ? 'border-[var(--accent-sell)]' : 'border-[var(--border-color)]';
-                    
+
                     return (
                         <div key={symbol} className={`bg-[var(--bg-dark-secondary)] rounded-lg shadow-xl border-l-4 ${borderColorClass} p-5 flex flex-col justify-between transition-transform transform hover:scale-105`}>
                             <div>

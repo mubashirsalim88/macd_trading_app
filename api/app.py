@@ -1,15 +1,20 @@
+# api/app.py
+import sys
+import os
 import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers, debug_single_rule
+# --- MODIFIED IMPORT ---
+from api.logic_evaluator import get_signals_from_redis, debug_single_rule 
 from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
 import json
-import os
 from dotenv import load_dotenv
 from typing import List, Optional
-# ✅ ADDED: Import MACD_PARAMS to use in the new config endpoint
 from src.config import MACD_PARAMS
+
+# Add the project root to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load API key from environment
 load_dotenv()
@@ -24,34 +29,27 @@ def require_api_key():
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
+# ... (The health_check, get_app_config, and all /api/rules endpoints remain unchanged) ...
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok", "message": "API is running"})
 
-# ✅ NEW ENDPOINT
 @app.route('/api/config', methods=['GET'])
 def get_app_config():
     """
     Provides the frontend with dynamic configuration, including only the
     MACD parameters that can be calculated with 7 days of data.
     """
-    # Define how many candles are in the 7-day period for each interval
     CANDLES_IN_7_DAYS = {
-        '1m': 60 * 24 * 7,   # 10,080 candles
-        '5m': 12 * 24 * 7,   #  2,016 candles
-        '15m': 4 * 24 * 7    #    672 candles
+        '1m': 60 * 24 * 7,
+        '5m': 12 * 24 * 7,
+        '15m': 4 * 24 * 7
     }
-
-    # Filter the MACD params to only include ones that are possible to calculate
     valid_params = {}
     for timeframe, params_list in MACD_PARAMS.items():
         max_candles = CANDLES_IN_7_DAYS.get(timeframe, 0)
-        # Keep a param set only if its 'slow' value (p[1]) is less than the available candles
-        valid_params[timeframe] = [
-            p for p in params_list if p[1] < max_candles
-        ]
-
-    # This config will be sent to the frontend
+        valid_params[timeframe] = [p for p in params_list if p[1] < max_candles]
     frontend_config = {
         'timeframes': list(MACD_PARAMS.keys()),
         'operators': ['>', '<', '>=', '<='],
@@ -59,7 +57,6 @@ def get_app_config():
         'macdParamsByTimeframe': valid_params
     }
     return jsonify(frontend_config)
-
 
 @app.route('/api/rules', methods=['POST'])
 def create_rule():
@@ -101,36 +98,32 @@ def delete_rule_endpoint(rule_id):
 @app.route('/api/data/<string:ticker>', methods=['GET'])
 def get_data(ticker: str):
     auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+    if auth_error: return auth_error
     try:
         keys = r.keys(f"{ticker}:*")
-        keys: List[bytes] = keys
-        if not keys:
-            return jsonify({"error": f"No data found for ticker {ticker}"}), 404
+        if not keys: return jsonify({"error": f"No data found for {ticker}"}), 404
         result = {ticker: {}}
         for key in keys:
             key_str = key.decode('utf-8')
             _, interval, params = key_str.split(':')
             data = r.get(key)
-            data: Optional[bytes] = data
             if data:
                 data_list = json.loads(data.decode('utf-8'))
                 if isinstance(data_list, list) and len(data_list) == 3:
                     result[ticker][f"{interval}:{params}"] = data_list
-        if not result[ticker]:
-            return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
+        if not result[ticker]: return jsonify({"error": f"No valid data found for {ticker}"}), 404
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
+# --- THIS ENDPOINT IS MODIFIED ---
 @app.route('/api/signals', methods=['GET'])
 def get_signals():
     auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+    if auth_error: return auth_error
     try:
-        signals = evaluate_all_tickers()
+        # Simply return the last known signals from Redis
+        signals = get_signals_from_redis()
         return jsonify(signals), 200
     except Exception:
         error_trace = traceback.format_exc()
@@ -139,9 +132,9 @@ def get_signals():
 
 @app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
 def debug_rule(ticker):
+    # This function remains unchanged
     auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+    if auth_error: return auth_error
     all_rules = get_all_rules()
     if not all_rules:
         return jsonify({"error": "No rules found in the database to debug."}), 404

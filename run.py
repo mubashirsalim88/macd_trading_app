@@ -1,4 +1,11 @@
 # run.py
+import sys
+import os
+from dotenv import load_dotenv # <-- CHANGE #1: ADD THIS IMPORT
+
+# Add the project root to the Python path and load environment variables
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv() # <-- CHANGE #2: ADD THIS LINE
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from src.engine import main

@@ -4,6 +4,13 @@
 ================================================================================
 
 # run.py
+import sys
+import os
+from dotenv import load_dotenv # <-- CHANGE #1: ADD THIS IMPORT
+
+# Add the project root to the Python path and load environment variables
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv() # <-- CHANGE #2: ADD THIS LINE
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from src.engine import main
@@ -21,21 +28,226 @@ if __name__ == "__main__":
 
 
 ================================================================================
-# 📄 api\app.py
+# 📄 src/data_fetcher.py
 ================================================================================
 
+import yfinance as yf
+import pandas as pd
+
+def get_historical_data(ticker, period='6mo', interval='1d'):
+    try:
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
+        if df is None or df.empty:
+            print(f"[Warning] No data returned for {ticker}.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        print(f"[Error] Failed to fetch data for {ticker}: {e}")
+        return pd.DataFrame()
+
+
+
+================================================================================
+# 📄 src/redis_client.py
+================================================================================
+
+# src/redis_client.py
+
+import redis
+from redis import Redis
+from typing import Optional, cast, Union, List
+import os
+import json
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
+
+r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+    try:
+        r.set(key, json.dumps(data))
+        print(f"[REDIS] Saved MACD for {key}")
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to save {key}: {e}")
+
+def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
+    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
+    try:
+        val = r.get(key)
+        if val:
+            val = cast(bytes, val)
+            return json.loads(val.decode("utf-8"))
+        return None
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
+        return None
+
+
+================================================================================
+# 📄 src/config.py
+================================================================================
+
+# config.py
+
+CRYPTO_TICKERS = [
+    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
+    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
+    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
+    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
+    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
+    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
+    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
+    "FTM-USD"
+]
+
+MACD_PARAMS = {
+    '1m': [
+        (12, 26, 9),
+        (36, 78, 27),
+        (60, 130, 45),
+        (180, 390, 135),
+        (360, 780, 270),
+        (720, 1560, 540),
+        (2160, 4680, 1620)
+    ],
+    '5m': [
+        (12, 26, 9),
+        (36, 78, 27),
+        (72, 156, 54),
+        (144, 312, 108),
+        (432, 936, 324),
+        (900, 1950, 675),
+        (4500, 9750, 3375)
+    ],
+    '15m': [
+        (12, 26, 9),
+        (24, 52, 18),
+        (48, 104, 36),
+        (144, 312, 108),
+        (300, 650, 225),
+        (1500, 3250, 1125),
+        (3000, 6500, 2250)
+    ]
+}
+
+
+
+================================================================================
+# 📄 src/engine.py
+================================================================================
+
+# src/engine.py
+
+from src.data_fetcher import get_historical_data
+from src.indicator_calculator import add_macd
+from src.config import CRYPTO_TICKERS, MACD_PARAMS
+from src.redis_client import save_macd_to_redis
+import pandas as pd
+from api.logic_evaluator import evaluate_all_tickers
+
+def main():
+    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
+
+    for ticker in CRYPTO_TICKERS:
+        for interval, param_list in MACD_PARAMS.items():
+            df = get_historical_data(ticker, period="7d", interval=interval)
+            if df.empty:
+                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
+                continue
+
+            for params in param_list:
+                fast, slow, signal = params
+                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
+                if df_macd.empty:
+                    continue
+
+                last_three_rows = df_macd.tail(3)
+                if len(last_three_rows) < 3:
+                    continue
+
+                data_to_save = [
+                    {
+                        "macd_line": float(row.macd_line.iloc[0]),
+                        "signal_line": float(row.signal_line.iloc[0]),
+                        "histogram": float(row.histogram.iloc[0]),
+                        "date": str(index.date())
+                    }
+                    for index, row in last_three_rows.iterrows()
+                ]
+
+                save_macd_to_redis(
+                    ticker,
+                    interval,
+                    {"fast": fast, "slow": slow, "signal": signal},
+                    data_to_save
+                )
+
+    print("\n✅ [INFO] Full scan complete.\n")
+    # --- THIS LINE IS MODIFIED ---
+    evaluate_all_tickers(send_notifications=True) 
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+# 📄 src/indicator_calculator.py
+================================================================================
+
+# indicator_calculator.py
+
+import pandas as pd
+
+def add_macd(df, fast=12, slow=26, signal=9):
+    # ✅ Check if there's enough data for the calculation
+    # The slow EMA requires the most data, so we check against that.
+    if len(df) <= slow:
+        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
+        return pd.DataFrame() # Return an empty DataFrame to signal failure
+
+    if 'Close' not in df.columns:
+        print("[Error] 'Close' column not found in DataFrame.")
+        return df
+
+    # Calculate EMAs
+    df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
+    df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
+
+    # MACD and Signal
+    df['macd_line'] = df['fast_ema'] - df['slow_ema']
+    df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
+
+    # Histogram
+    df['histogram'] = df['macd_line'] - df['signal_line']
+
+    return df
+
+
+================================================================================
+# 📄 api/app.py
+================================================================================
+
+# api/app.py
+import sys
+import os
 import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
-from api.logic_evaluator import evaluate_all_tickers, debug_single_rule
+# --- MODIFIED IMPORT ---
+from api.logic_evaluator import get_signals_from_redis, debug_single_rule 
 from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
 import json
-import os
 from dotenv import load_dotenv
 from typing import List, Optional
-# ✅ ADDED: Import MACD_PARAMS to use in the new config endpoint
 from src.config import MACD_PARAMS
+
+# Add the project root to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load API key from environment
 load_dotenv()
@@ -50,34 +262,27 @@ def require_api_key():
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
+# ... (The health_check, get_app_config, and all /api/rules endpoints remain unchanged) ...
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok", "message": "API is running"})
 
-# ✅ NEW ENDPOINT
 @app.route('/api/config', methods=['GET'])
 def get_app_config():
     """
     Provides the frontend with dynamic configuration, including only the
     MACD parameters that can be calculated with 7 days of data.
     """
-    # Define how many candles are in the 7-day period for each interval
     CANDLES_IN_7_DAYS = {
-        '1m': 60 * 24 * 7,   # 10,080 candles
-        '5m': 12 * 24 * 7,   #  2,016 candles
-        '15m': 4 * 24 * 7    #    672 candles
+        '1m': 60 * 24 * 7,
+        '5m': 12 * 24 * 7,
+        '15m': 4 * 24 * 7
     }
-
-    # Filter the MACD params to only include ones that are possible to calculate
     valid_params = {}
     for timeframe, params_list in MACD_PARAMS.items():
         max_candles = CANDLES_IN_7_DAYS.get(timeframe, 0)
-        # Keep a param set only if its 'slow' value (p[1]) is less than the available candles
-        valid_params[timeframe] = [
-            p for p in params_list if p[1] < max_candles
-        ]
-
-    # This config will be sent to the frontend
+        valid_params[timeframe] = [p for p in params_list if p[1] < max_candles]
     frontend_config = {
         'timeframes': list(MACD_PARAMS.keys()),
         'operators': ['>', '<', '>=', '<='],
@@ -85,7 +290,6 @@ def get_app_config():
         'macdParamsByTimeframe': valid_params
     }
     return jsonify(frontend_config)
-
 
 @app.route('/api/rules', methods=['POST'])
 def create_rule():
@@ -127,36 +331,32 @@ def delete_rule_endpoint(rule_id):
 @app.route('/api/data/<string:ticker>', methods=['GET'])
 def get_data(ticker: str):
     auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+    if auth_error: return auth_error
     try:
         keys = r.keys(f"{ticker}:*")
-        keys: List[bytes] = keys
-        if not keys:
-            return jsonify({"error": f"No data found for ticker {ticker}"}), 404
+        if not keys: return jsonify({"error": f"No data found for {ticker}"}), 404
         result = {ticker: {}}
         for key in keys:
             key_str = key.decode('utf-8')
             _, interval, params = key_str.split(':')
             data = r.get(key)
-            data: Optional[bytes] = data
             if data:
                 data_list = json.loads(data.decode('utf-8'))
                 if isinstance(data_list, list) and len(data_list) == 3:
                     result[ticker][f"{interval}:{params}"] = data_list
-        if not result[ticker]:
-            return jsonify({"error": f"No valid data found for ticker {ticker}"}), 404
+        if not result[ticker]: return jsonify({"error": f"No valid data found for {ticker}"}), 404
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
+# --- THIS ENDPOINT IS MODIFIED ---
 @app.route('/api/signals', methods=['GET'])
 def get_signals():
     auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+    if auth_error: return auth_error
     try:
-        signals = evaluate_all_tickers()
+        # Simply return the last known signals from Redis
+        signals = get_signals_from_redis()
         return jsonify(signals), 200
     except Exception:
         error_trace = traceback.format_exc()
@@ -165,9 +365,9 @@ def get_signals():
 
 @app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
 def debug_rule(ticker):
+    # This function remains unchanged
     auth_error = require_api_key()
-    if auth_error:
-        return auth_error
+    if auth_error: return auth_error
     all_rules = get_all_rules()
     if not all_rules:
         return jsonify({"error": "No rules found in the database to debug."}), 404
@@ -179,52 +379,74 @@ if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
 
 
-================================================================================
-# 📄 api\firestore_client.py
-================================================================================
-
-# api/firestore_client.py
-from google.cloud import firestore
-
-# The library will now automatically use the VM's service account permissions
-db = firestore.Client()
-rules_collection = db.collection('rules')
-
-def get_all_rules():
-    """Fetches all documents from the 'rules' collection."""
-    return [doc.to_dict() for doc in rules_collection.stream()]
-
-def save_rule(rule_data: dict):
-    """Saves a new rule to Firestore, letting Firestore auto-generate the ID."""
-    doc_ref = rules_collection.document()
-    rule_data['id'] = doc_ref.id
-    doc_ref.set(rule_data)
-    return rule_data
-
-def update_rule(rule_id: str, rule_data: dict):
-    """Updates an existing rule in Firestore."""
-    doc_ref = rules_collection.document(rule_id)
-    # Ensure the ID from the URL is used and saved in the document
-    rule_data['id'] = rule_id
-    doc_ref.set(rule_data) # set() with an existing doc ID overwrites it
-    return rule_data
-
-def delete_rule(rule_id: str):
-    """Deletes a rule from Firestore."""
-    rules_collection.document(rule_id).delete()
-
-
 
 ================================================================================
-# 📄 api\logic_evaluator.py
+# 📄 api/notifications.py
 ================================================================================
+
+# 📄 api/notifications.py
+
+import requests
+import os
+
+def send_telegram_message(message: str):
+    """Sends a message to the Telegram channel configured in the .env file."""
+    
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
+    if not token or not chat_id:
+        print("[TELEGRAM ERROR] Bot Token or Chat ID is not configured in .env file.")
+        return
+
+    # Using MarkdownV2 for better formatting
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "MarkdownV2" 
+    }
+    
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status() # Will raise an exception for 4xx/5xx errors
+        print(f"[TELEGRAM] Sent message: {message.splitlines()[0]}...")
+    except requests.exceptions.RequestException as e:
+        print(f"[TELEGRAM ERROR] Failed to send message: {e}")
+
+
+
+================================================================================
+# 📄 api/logic_evaluator.py
+================================================================================
+
+# api/logic_evaluator.py
 
 from src.redis_client import get_macd_from_redis
 from src.config import CRYPTO_TICKERS
 from api.firestore_client import get_all_rules
-
-# ✅ NEW: Import Telegram message function
 from api.notifications import send_telegram_message
+import json
+from src.redis_client import r # Import the redis client
+
+# --- THIS IS A NEW FUNCTION ---
+def save_signals_to_redis(signals):
+    """Saves the latest evaluated signals to a single key in Redis."""
+    try:
+        r.set('latest_signals', json.dumps(signals))
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to save latest signals: {e}")
+
+# --- THIS IS A NEW FUNCTION ---
+def get_signals_from_redis():
+    """Retrieves the latest signals from Redis."""
+    try:
+        signals = r.get('latest_signals')
+        if signals:
+            return json.loads(signals.decode('utf-8'))
+    except Exception as e:
+        print(f"[REDIS ERROR] Failed to get latest signals: {e}")
+    return {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
 
 
 def get_operand_value(operand, ticker):
@@ -289,28 +511,38 @@ def evaluate_single_rule(rule, ticker):
     return True
 
 
-def evaluate_all_tickers():
+# --- THIS FUNCTION IS MODIFIED ---
+def evaluate_all_tickers(send_notifications=False):
     """
-    Loads all rules from Firestore and evaluates them against all tickers.
-    ✅ UPDATED: Sends Telegram alert if a rule requires it.
+    Loads all rules and evaluates them.
+    If send_notifications is True, it will send Telegram alerts.
     """
     all_rules = get_all_rules()
     signals = {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
+    
+    # Get previous signals to avoid re-sending alerts
+    previous_signals = get_signals_from_redis()
 
     if not all_rules:
+        save_signals_to_redis(signals)
         return signals
 
     for ticker in CRYPTO_TICKERS:
         for rule in all_rules:
             if evaluate_single_rule(rule, ticker):
-                signals[ticker]['signal'] = rule['signal']
-                signals[ticker]['rule_name'] = rule.get('name', 'Unnamed Rule')
+                current_signal = rule['signal']
+                current_rule_name = rule.get('name', 'Unnamed Rule')
 
-                # ✅ NEW: Send Telegram message if rule has notifications enabled
-                if rule.get('telegram_enabled', False):
-                    rule_name_safe = rule.get('name', 'Unnamed Rule').replace('-', '\\-').replace('.', '\\.')
+                signals[ticker]['signal'] = current_signal
+                signals[ticker]['rule_name'] = current_rule_name
+
+                # Check if this is a NEW signal before sending an alert
+                previous_ticker_signal = previous_signals.get(ticker, {}).get('signal', 'NO_SIGNAL')
+                
+                if send_notifications and rule.get('telegram_enabled', False) and current_signal != previous_ticker_signal:
+                    rule_name_safe = current_rule_name.replace('-', '\\-').replace('.', '\\.')
                     ticker_safe = ticker.replace('-', '\\-')
-                    signal_safe = rule['signal'].replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
+                    signal_safe = current_signal.replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
 
                     message = (
                         f"🚨 *NNTE Signal Alert* 🚨\n\n"
@@ -319,14 +551,16 @@ def evaluate_all_tickers():
                         f"*Rule:* `{rule_name_safe}`"
                     )
                     send_telegram_message(message)
+                
+                break
 
-                break  # Only apply the first matching rule per ticker
-
+    # Always save the latest signals after evaluation
+    save_signals_to_redis(signals)
     return signals
 
 
 def debug_single_rule(rule, ticker):
-    """Provides a detailed step-by-step evaluation of a rule for debugging."""
+    # This function remains unchanged
     if 'id' not in rule:
         return {"error": "Rule has no ID"}
 
@@ -381,241 +615,39 @@ def debug_single_rule(rule, ticker):
 
 
 ================================================================================
-# 📄 api\notifications.py
+# 📄 api/firestore_client.py
 ================================================================================
 
-# 📄 api/notifications.py
+# api/firestore_client.py
+from google.cloud import firestore
 
-import requests
-import os
+# The library will now automatically use the VM's service account permissions
+db = firestore.Client()
+rules_collection = db.collection('rules')
 
-def send_telegram_message(message: str):
-    """Sends a message to the Telegram channel configured in the .env file."""
-    
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    
-    if not token or not chat_id:
-        print("[TELEGRAM ERROR] Bot Token or Chat ID is not configured in .env file.")
-        return
+def get_all_rules():
+    """Fetches all documents from the 'rules' collection."""
+    return [doc.to_dict() for doc in rules_collection.stream()]
 
-    # Using MarkdownV2 for better formatting
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "MarkdownV2" 
-    }
-    
-    try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status() # Will raise an exception for 4xx/5xx errors
-        print(f"[TELEGRAM] Sent message: {message.splitlines()[0]}...")
-    except requests.exceptions.RequestException as e:
-        print(f"[TELEGRAM ERROR] Failed to send message: {e}")
+def save_rule(rule_data: dict):
+    """Saves a new rule to Firestore, letting Firestore auto-generate the ID."""
+    doc_ref = rules_collection.document()
+    rule_data['id'] = doc_ref.id
+    doc_ref.set(rule_data)
+    return rule_data
 
+def update_rule(rule_id: str, rule_data: dict):
+    """Updates an existing rule in Firestore."""
+    doc_ref = rules_collection.document(rule_id)
+    # Ensure the ID from the URL is used and saved in the document
+    rule_data['id'] = rule_id
+    doc_ref.set(rule_data) # set() with an existing doc ID overwrites it
+    return rule_data
 
+def delete_rule(rule_id: str):
+    """Deletes a rule from Firestore."""
+    rules_collection.document(rule_id).delete()
 
-================================================================================
-# 📄 src\config.py
-================================================================================
-
-# config.py
-
-CRYPTO_TICKERS = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
-    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
-    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
-    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
-    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
-    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
-    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
-    "FTM-USD"
-]
-
-MACD_PARAMS = {
-    '1m': [
-        (12, 26, 9),
-        (36, 78, 27),
-        (60, 130, 45),
-        (180, 390, 135),
-        (360, 780, 270),
-        (720, 1560, 540),
-        (2160, 4680, 1620)
-    ],
-    '5m': [
-        (12, 26, 9),
-        (36, 78, 27),
-        (72, 156, 54),
-        (144, 312, 108),
-        (432, 936, 324),
-        (900, 1950, 675),
-        (4500, 9750, 3375)
-    ],
-    '15m': [
-        (12, 26, 9),
-        (24, 52, 18),
-        (48, 104, 36),
-        (144, 312, 108),
-        (300, 650, 225),
-        (1500, 3250, 1125),
-        (3000, 6500, 2250)
-    ]
-}
-
-
-
-================================================================================
-# 📄 src\data_fetcher.py
-================================================================================
-
-import yfinance as yf
-import pandas as pd
-
-def get_historical_data(ticker, period='6mo', interval='1d'):
-    try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
-        if df is None or df.empty:
-            print(f"[Warning] No data returned for {ticker}.")
-            return pd.DataFrame()
-        return df
-    except Exception as e:
-        print(f"[Error] Failed to fetch data for {ticker}: {e}")
-        return pd.DataFrame()
-
-
-
-================================================================================
-# 📄 src\engine.py
-================================================================================
-
-# src/engine.py
-
-from src.data_fetcher import get_historical_data
-from src.indicator_calculator import add_macd
-from src.config import CRYPTO_TICKERS, MACD_PARAMS
-from src.redis_client import save_macd_to_redis
-import pandas as pd
-
-def main():
-    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
-
-    for ticker in CRYPTO_TICKERS:
-        for interval, param_list in MACD_PARAMS.items():
-            # This print statement is optional but helpful for seeing progress
-            # print(f"--- {ticker} @ {interval} ---")
-
-            df = get_historical_data(ticker, period="7d", interval=interval)
-            if df.empty:
-                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
-                continue
-
-            for params in param_list:
-                fast, slow, signal = params
-
-                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
-                if df_macd.empty:
-                    continue
-
-                last_three_rows = df_macd.tail(3)
-                if len(last_three_rows) < 3:
-                    continue
-
-                # ✅ FINAL CORRECTED VERSION
-                data_to_save = [
-                    {
-                        "macd_line": float(row.macd_line.iloc[0]),
-                        "signal_line": float(row.signal_line.iloc[0]),
-                        "histogram": float(row.histogram.iloc[0]),
-                        "date": str(index.date())
-                    }
-                    for index, row in last_three_rows.iterrows()
-                ]
-
-                save_macd_to_redis(
-                    ticker,
-                    interval,
-                    {"fast": fast, "slow": slow, "signal": signal},
-                    data_to_save
-                )
-
-    print("\n✅ [INFO] Full scan complete.\n")
-
-if __name__ == "__main__":
-    main()
-
-
-
-================================================================================
-# 📄 src\indicator_calculator.py
-================================================================================
-
-# indicator_calculator.py
-
-import pandas as pd
-
-def add_macd(df, fast=12, slow=26, signal=9):
-    # ✅ Check if there's enough data for the calculation
-    # The slow EMA requires the most data, so we check against that.
-    if len(df) <= slow:
-        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
-        return pd.DataFrame() # Return an empty DataFrame to signal failure
-
-    if 'Close' not in df.columns:
-        print("[Error] 'Close' column not found in DataFrame.")
-        return df
-
-    # Calculate EMAs
-    df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
-    df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
-
-    # MACD and Signal
-    df['macd_line'] = df['fast_ema'] - df['slow_ema']
-    df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
-
-    # Histogram
-    df['histogram'] = df['macd_line'] - df['signal_line']
-
-    return df
-
-
-================================================================================
-# 📄 src\redis_client.py
-================================================================================
-
-# src/redis_client.py
-
-import redis
-from redis import Redis
-from typing import Optional, cast, Union, List
-import os
-import json
-
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB = int(os.getenv("REDIS_DB", 0))
-
-r: Redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
-
-def save_macd_to_redis(ticker: str, interval: str, params: dict, data: Union[dict, List[dict]]) -> None:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
-    try:
-        r.set(key, json.dumps(data))
-        print(f"[REDIS] Saved MACD for {key}")
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to save {key}: {e}")
-
-def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[List[dict]]:
-    key = f"{ticker}:{interval}:{params['fast']}-{params['slow']}-{params['signal']}"
-    try:
-        val = r.get(key)
-        if val:
-            val = cast(bytes, val)
-            return json.loads(val.decode("utf-8"))
-        return None
-    except Exception as e:
-        print(f"[REDIS ERROR] Failed to fetch {key}: {e}")
-        return None
 
 
 
@@ -625,35 +657,7 @@ def get_macd_from_redis(ticker: str, interval: str, params: dict) -> Optional[Li
 
 
 ================================================================================
-# 📄 frontend\src\apiService.js
-================================================================================
-
-// frontend/src/apiService.js
-import axios from 'axios';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL;
-const API_KEY = import.meta.env.VITE_API_KEY;
-
-const apiClient = axios.create({
-  baseURL: API_BASE_URL,
-  headers: {
-    'X-API-KEY': API_KEY,
-    'Content-Type': 'application/json'
-  }
-});
-
-// ✅ NEW FUNCTION
-export const getConfig = () => apiClient.get('/api/config');
-
-export const getSignals = () => apiClient.get('/api/signals');
-export const getRules = () => apiClient.get('/api/rules');
-export const saveRule = (ruleData) => apiClient.post('/api/rules', ruleData);
-export const updateRule = (ruleId, ruleData) => apiClient.put(`/api/rules/${ruleId}`, ruleData);
-export const deleteRule = (ruleId) => apiClient.delete(`/api/rules/${ruleId}`);
-
-
-================================================================================
-# 📄 frontend\src\App.jsx
+# 📄 frontend/src/App.jsx
 ================================================================================
 
 // frontend/src/App.jsx
@@ -711,33 +715,55 @@ export default App;
 
 
 ================================================================================
-# 📄 frontend\src\config.js
+# 📄 frontend/src/apiService.js
 ================================================================================
 
-// frontend/src/config.js
-export const TIME_FRAMES = ['1m', '5m', '15m'];
-export const OPERATORS = ['>', '<', '>=', '<='];
-export const MACD_VALUES = ['macd_line', 'signal_line', 'histogram'];
+// frontend/src/apiService.js
+import axios from 'axios';
 
-// ✅ CORRECTED STRUCTURE: Parameters are now grouped by timeframe
-export const MACD_PARAMS_BY_TIMEFRAME = {
-  '1m': [
-    [12, 26, 9], [36, 78, 27], [60, 130, 45], [180, 390, 135],
-    [360, 780, 270], [720, 1560, 540], [2160, 4680, 1620]
-  ],
-  '5m': [
-    [12, 26, 9], [36, 78, 27], [72, 156, 54], [144, 312, 108],
-    [432, 936, 324], [900, 1950, 675], [4500, 9750, 3375]
-  ],
-  '15m': [
-    [12, 26, 9], [24, 52, 18], [48, 104, 36], [144, 312, 108],
-    [300, 650, 225], [1500, 3250, 1125], [3000, 6500, 2250]
-  ]
-};
+const API_BASE_URL = import.meta.env.VITE_API_URL;
+const API_KEY = import.meta.env.VITE_API_KEY;
+
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  headers: {
+    'X-API-KEY': API_KEY,
+    'Content-Type': 'application/json'
+  }
+});
+
+// ✅ NEW FUNCTION
+export const getConfig = () => apiClient.get('/api/config');
+
+export const getSignals = () => apiClient.get('/api/signals');
+export const getRules = () => apiClient.get('/api/rules');
+export const saveRule = (ruleData) => apiClient.post('/api/rules', ruleData);
+export const updateRule = (ruleId, ruleData) => apiClient.put(`/api/rules/${ruleId}`, ruleData);
+export const deleteRule = (ruleId) => apiClient.delete(`/api/rules/${ruleId}`);
 
 
 ================================================================================
-# 📄 frontend\src\index.css
+# 📄 frontend/src/main.jsx
+================================================================================
+
+// frontend/src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+import { BrowserRouter } from 'react-router-dom';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+
+================================================================================
+# 📄 frontend/src/index.css
 ================================================================================
 
 /* frontend/src/index.css */
@@ -792,174 +818,45 @@ input:checked + .block {
 
 
 ================================================================================
-# 📄 frontend\src\main.jsx
+# 📄 frontend/src/config.js
 ================================================================================
 
-// frontend/src/main.jsx
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App.jsx';
-import './index.css';
-import { BrowserRouter } from 'react-router-dom';
+// frontend/src/config.js
+export const TIME_FRAMES = ['1m', '5m', '15m'];
+export const OPERATORS = ['>', '<', '>=', '<='];
+export const MACD_VALUES = ['macd_line', 'signal_line', 'histogram'];
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </React.StrictMode>
-);
-
-
-================================================================================
-# 📄 frontend\src\components\Dashboard.jsx
-================================================================================
-
-// frontend/src/components/Dashboard.jsx
-
-import { useState, useEffect } from 'react';
-import { getSignals, getRules } from '../apiService';
-
-// A small SVG component for the refresh spinner
-const RefreshSpinner = () => (
-    <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-    </svg>
-);
-
-function Dashboard() {
-    const [signals, setSignals] = useState([]);
-    const [rules, setRules] = useState([]);
-    const [initialLoading, setInitialLoading] = useState(true);
-    // ✅ NEW: State for the silent refresh indicator
-    const [isRefreshing, setIsRefreshing] = useState(false);
-    
-    const [activeRuleFilter, setActiveRuleFilter] = useState('all');
-    const [showNoSignal, setShowNoSignal] = useState(false);
-    const [lastUpdated, setLastUpdated] = useState(new Date());
-
-    useEffect(() => {
-        const fetchAllData = async () => {
-            // Only use the main loading state on the very first run
-            if (!initialLoading) {
-                setIsRefreshing(true);
-            }
-
-            try {
-                const [signalsResponse, rulesResponse] = await Promise.all([getSignals(), getRules()]);
-                const signalsArray = Object.entries(signalsResponse.data).map(([symbol, data]) => ({
-                    symbol,
-                    signal: data.signal,
-                    rule_name: data.rule_name,
-                }));
-                setSignals(signalsArray);
-                setRules(rulesResponse.data);
-                setLastUpdated(new Date());
-            } catch (error) {
-                console.error('Error fetching dashboard data:', error);
-            } finally {
-                if (initialLoading) setInitialLoading(false);
-                setIsRefreshing(false);
-            }
-        };
-
-        fetchAllData();
-        const interval = setInterval(fetchAllData, 15000);
-        return () => clearInterval(interval);
-    }, []); // This dependency array is intentionally empty to control loading states manually
-
-    const filteredSignals = signals.filter(s => {
-        const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
-        const signalMatch = showNoSignal || s.signal !== 'NO_SIGNAL';
-        return ruleMatch && signalMatch;
-    });
-
-    if (initialLoading) {
-        return <p className="text-center text-[var(--text-secondary)] mt-20 text-lg">Initializing Signal Matrix...</p>;
-    }
-
-    return (
-        <div className="container mx-auto p-4 md:p-6">
-            <div className="text-center mb-6">
-                <h1 className="text-4xl font-extrabold text-white">Signal Dashboard</h1>
-                <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
-                    {isRefreshing && <RefreshSpinner />}
-                    <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
-                </div>
-            </div>
-
-            {/* ✅ REDESIGNED FILTER BAR */}
-            <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                    <div className="flex items-center flex-wrap gap-2">
-                        <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
-                        <button 
-                            onClick={() => setActiveRuleFilter('all')}
-                            className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
-                            All Signals
-                        </button>
-                        {rules.map(rule => (
-                            <button 
-                                key={rule.id}
-                                onClick={() => setActiveRuleFilter(rule.name)}
-                                className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === rule.name ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
-                                {rule.name}
-                            </button>
-                        ))}
-                    </div>
-
-                    <label htmlFor="showNoSignal" className="flex items-center cursor-pointer">
-                        <span className="mr-3 text-sm text-[var(--text-secondary)]">Show 'NO_SIGNAL'</span>
-                        <div className="relative">
-                            <input type="checkbox" id="showNoSignal" className="sr-only" checked={showNoSignal} onChange={e => setShowNoSignal(e.target.checked)} />
-                            <div className="block bg-gray-600 w-10 h-6 rounded-full"></div>
-                            <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
-                        </div>
-                    </label>
-                </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
-                {filteredSignals.map(({ symbol, signal, rule_name }) => {
-                    const isBuy = signal.includes('BUY');
-                    const isSell = signal.includes('SELL');
-                    const signalColorClass = isBuy ? 'text-[var(--accent-buy)]' : isSell ? 'text-[var(--accent-sell)]' : 'text-[var(--text-secondary)]';
-                    const signalBgClass = isBuy ? 'bg-[var(--accent-buy-bg)]' : isSell ? 'bg-[var(--accent-sell-bg)]' : 'bg-gray-700/20';
-                    const borderColorClass = isBuy ? 'border-[var(--accent-buy)]' : isSell ? 'border-[var(--accent-sell)]' : 'border-[var(--border-color)]';
-                    
-                    return (
-                        <div key={symbol} className={`bg-[var(--bg-dark-secondary)] rounded-lg shadow-xl border-l-4 ${borderColorClass} p-5 flex flex-col justify-between transition-transform transform hover:scale-105`}>
-                            <div>
-                                <div className="font-bold text-2xl text-white mb-2">{symbol}</div>
-                                <div className={`font-semibold text-lg ${signalColorClass} mb-3`}>{signal}</div>
-                            </div>
-                            <div className={`text-xs text-right text-[var(--text-secondary)] italic p-2 rounded-md ${signalBgClass}`}>
-                                {rule_name || 'N/A'}
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
-        </div>
-    );
-}
-
-export default Dashboard;
+// ✅ CORRECTED STRUCTURE: Parameters are now grouped by timeframe
+export const MACD_PARAMS_BY_TIMEFRAME = {
+  '1m': [
+    [12, 26, 9], [36, 78, 27], [60, 130, 45], [180, 390, 135],
+    [360, 780, 270], [720, 1560, 540], [2160, 4680, 1620]
+  ],
+  '5m': [
+    [12, 26, 9], [36, 78, 27], [72, 156, 54], [144, 312, 108],
+    [432, 936, 324], [900, 1950, 675], [4500, 9750, 3375]
+  ],
+  '15m': [
+    [12, 26, 9], [24, 52, 18], [48, 104, 36], [144, 312, 108],
+    [300, 650, 225], [1500, 3250, 1125], [3000, 6500, 2250]
+  ]
+};
 
 
 ================================================================================
-# 📄 frontend\src\components\RuleBuilder.jsx
+# 📄 frontend/src/components/RuleBuilder.jsx
 ================================================================================
 
-import { useState, useEffect } from 'react';
+// frontend/src/components/RuleBuilder.jsx
+
+import { useState, useEffect, useCallback } from 'react';
 import { getRules, saveRule, updateRule, deleteRule, getConfig } from '../apiService';
 
 // --- Helper Icons ---
 const CloseIcon = () => (
     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
 );
-const SaveSpinner = () => (
+const Spinner = () => (
     <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -970,7 +867,6 @@ const SaveSpinner = () => (
 const defaultLiteral = { type: 'literal', value: 0 };
 
 const AdvancedOperandSelector = ({ value, onChange, config }) => {
-    // ... (This component's code remains unchanged)
     if (!value || !config) {
         return <div className="p-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-dark-primary)] animate-pulse h-52"></div>;
     }
@@ -1014,7 +910,7 @@ const AdvancedOperandSelector = ({ value, onChange, config }) => {
     );
 };
 
-const Toast = ({ message, show, onDismiss }) => {
+const Toast = ({ message, show }) => {
     if (!show) return null;
     return (
         <div className="fixed bottom-5 right-5 bg-green-600 text-white py-2 px-4 rounded-lg shadow-lg animate-bounce">
@@ -1029,10 +925,10 @@ function RuleBuilder() {
     const [isLoading, setIsLoading] = useState(true);
     const [appConfig, setAppConfig] = useState(null);
     const [isFormVisible, setIsFormVisible] = useState(false);
-    
-    // ✅ NEW: State for the save/update loading indicator and toast message
+
     const [isSaving, setIsSaving] = useState(false);
     const [toastMessage, setToastMessage] = useState('');
+    const [deletingId, setDeletingId] = useState(null);
 
     const [ruleName, setRuleName] = useState('');
     const [signal, setSignal] = useState('');
@@ -1041,11 +937,10 @@ function RuleBuilder() {
 
     const showToast = (message) => {
         setToastMessage(message);
-        setTimeout(() => setToastMessage(''), 3000); // Hide after 3 seconds
+        setTimeout(() => setToastMessage(''), 3000);
     };
 
-    const resetForm = (config) => {
-        // ... (This function remains unchanged)
+    const resetForm = useCallback((config) => {
         const targetConfig = config || appConfig;
         setRuleName('');
         setSignal('');
@@ -1056,19 +951,20 @@ function RuleBuilder() {
             const defaultIndicator = { type: 'indicator', source: 'macd', timeframe: defaultTimeframe, params: defaultParams, value: 'macd_line', offset: 0 };
             setConditions([{ operand1: { ...defaultIndicator }, operator: targetConfig.operators[0], operand2: { ...defaultIndicator, value: 'signal_line' } }]);
         }
-    };
+    }, [appConfig]);
 
     const handleAddNewClick = () => {
         resetForm(appConfig);
         setIsFormVisible(true);
     };
-    
+
     const handleEditClick = (rule) => {
         setEditingRuleId(rule.id);
         setRuleName(rule.name);
         setSignal(rule.signal);
         setConditions(rule.conditions);
         setIsFormVisible(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll to top to see form on mobile
     };
 
     const handleCancel = () => {
@@ -1076,23 +972,22 @@ function RuleBuilder() {
         setIsFormVisible(false);
     };
 
-    const fetchInitialData = async () => {
-        // ... (This function remains unchanged)
-        setIsLoading(true);
-        try {
-            const [configRes, rulesRes] = await Promise.all([getConfig(), getRules()]);
-            setAppConfig(configRes.data);
-            setRules(rulesRes.data);
-            resetForm(configRes.data);
-        } catch (error) {
-            console.error("Failed to fetch initial data:", error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-    
     useEffect(() => {
+        const fetchInitialData = async () => {
+            setIsLoading(true);
+            try {
+                const [configRes, rulesRes] = await Promise.all([getConfig(), getRules()]);
+                setAppConfig(configRes.data);
+                setRules(rulesRes.data);
+                resetForm(configRes.data);
+            } catch (error) {
+                console.error("Failed to fetch initial data:", error);
+            } finally {
+                setIsLoading(false);
+            }
+        };
         fetchInitialData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const fetchRules = async () => {
@@ -1101,9 +996,8 @@ function RuleBuilder() {
             setRules(response.data);
         } catch (error) { console.error("Failed to fetch rules:", error); }
     };
-    
+
     const handleTelegramToggle = async (ruleToUpdate) => {
-        // ... (This function remains unchanged)
         const updatedRule = { ...ruleToUpdate, telegram_enabled: !ruleToUpdate.telegram_enabled };
         setRules(currentRules => currentRules.map(r => r.id === updatedRule.id ? updatedRule : r));
         try {
@@ -1124,26 +1018,30 @@ function RuleBuilder() {
     const removeCondition = (index) => setConditions(conditions.filter((_, i) => i !== index));
 
     const handleDelete = async (ruleId) => {
-        // ... (This function remains unchanged)
         if (window.confirm("Are you sure you want to permanently delete this rule?")) {
+            setDeletingId(ruleId);
             try {
                 await deleteRule(ruleId);
-                fetchRules();
-            } catch (error) { console.error("Failed to delete rule:", error); }
+                showToast('Logic deleted successfully!');
+                await fetchRules();
+            } catch (error) {
+                console.error("Failed to delete rule:", error);
+                alert("Could not delete rule. Please try again.");
+            } finally {
+                setDeletingId(null);
+            }
         }
     };
 
     const handleSaveOrUpdateRule = async (e) => {
         e.preventDefault();
-        setIsSaving(true); // ✅ Start loading indicator
-
+        setIsSaving(true);
         const ruleJSON = {
             name: ruleName,
             signal: signal,
             conditions: conditions,
             telegram_enabled: rules.find(r => r.id === editingRuleId)?.telegram_enabled || false
         };
-
         try {
             if (editingRuleId) {
                 await updateRule(editingRuleId, ruleJSON);
@@ -1158,7 +1056,7 @@ function RuleBuilder() {
             console.error("Failed to save/update rule:", error);
             alert("Failed to save rule. Check console for errors.");
         } finally {
-            setIsSaving(false); // ✅ Stop loading indicator
+            setIsSaving(false);
         }
     };
 
@@ -1170,7 +1068,8 @@ function RuleBuilder() {
         <div className="container mx-auto p-4 md:p-6">
             <Toast message={toastMessage} show={!!toastMessage} />
             <div className="flex justify-between items-center mb-8">
-                <h1 className="text-4xl font-extrabold text-white">Logic Engine</h1>
+                {/* ✅ CHANGED: Responsive text size */}
+                <h1 className="text-3xl md:text-4xl font-extrabold text-white">Logic Engine</h1>
                 {!isFormVisible && (
                     <button onClick={handleAddNewClick} className="bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-2 px-4 rounded-lg shadow-lg transition-colors">
                         + Create New Logic
@@ -1184,7 +1083,7 @@ function RuleBuilder() {
                         <h2 className="text-2xl font-bold">{editingRuleId ? 'Edit Logic' : 'Create New Logic'}</h2>
                         <button onClick={handleCancel} className="text-[var(--text-secondary)] hover:text-white"><CloseIcon /></button>
                     </div>
-                    
+
                     <form onSubmit={handleSaveOrUpdateRule}>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                             <input type="text" placeholder="Rule Name (e.g., L33BC Rule)" value={ruleName} onChange={e => setRuleName(e.target.value)} required className="p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)]" />
@@ -1192,7 +1091,8 @@ function RuleBuilder() {
                         </div>
                         <h3 className="text-lg font-semibold mb-2 text-gray-300">Conditions (All must be TRUE)</h3>
                         <div className="space-y-4">{conditions.map((cond, index) => (
-                            <div key={index} className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr_auto] gap-4 items-center bg-[var(--bg-dark-secondary)] p-4 rounded-lg border border-[var(--border-color)]">
+                            // ✅ CHANGED: From a complex grid to a responsive flex layout
+                            <div key={index} className="flex flex-col lg:flex-row gap-4 items-stretch lg:items-center bg-[var(--bg-dark-secondary)] p-4 rounded-lg border border-[var(--border-color)]">
                                 <AdvancedOperandSelector value={cond.operand1} onChange={(val) => handleConditionChange(index, 'operand1', val)} config={appConfig} />
                                 <select value={cond.operator} onChange={(e) => handleConditionChange(index, 'operator', e.target.value)} className="w-full lg:w-auto p-3 bg-[var(--bg-dark-primary)] border border-[var(--border-color)] rounded-md focus:ring-2 focus:ring-[var(--accent-primary)] font-mono text-lg">
                                     {appConfig.operators.map(op => <option key={op} value={op}>{op}</option>)}
@@ -1204,34 +1104,39 @@ function RuleBuilder() {
                         <button type="button" onClick={addCondition} className="mt-4 text-sm text-[var(--accent-primary)] hover:underline">+ Add Condition</button>
                         <div className="flex items-center mt-6 border-t border-[var(--border-color)] pt-6 space-x-4">
                             <button type="submit" disabled={isSaving} className="flex-grow bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] text-white font-bold py-3 px-4 rounded-lg shadow-lg transition-colors flex items-center justify-center disabled:opacity-50">
-                                {isSaving ? <><SaveSpinner /><span>Saving...</span></> : (editingRuleId ? 'Update Rule' : 'Save New Rule')}
+                                {isSaving ? <><Spinner /><span>Saving...</span></> : (editingRuleId ? 'Update Rule' : 'Save New Rule')}
                             </button>
                             <button type="button" onClick={handleCancel} className="flex-grow bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] hover:bg-[var(--border-color)] text-[var(--text-secondary)] hover:text-white font-bold py-3 px-4 rounded-lg transition-colors">Cancel</button>
                         </div>
                     </form>
                 </div>
             )}
-            
+
             <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] rounded-xl shadow-lg">
                 <h3 className="text-xl font-bold p-4 border-b border-[var(--border-color)]">Saved Logic Library</h3>
                 {rules.length === 0 ? <p className="p-4 text-[var(--text-secondary)]">No logic saved yet. Click 'Create New Logic' to begin.</p> :
                     <ul>{rules.map(rule => (
-                        <li key={rule.id} className="border-b border-[var(--border-color)] p-4 flex justify-between items-center hover:bg-[var(--bg-dark-primary)] transition-colors">
+                        // ✅ CHANGED: Main list item now stacks vertically on mobile
+                        <li key={rule.id} className={`border-b border-[var(--border-color)] p-4 flex flex-col sm:flex-row sm:justify-between sm:items-center hover:bg-[var(--bg-dark-primary)] transition-colors ${deletingId === rule.id ? 'opacity-50' : ''}`}>
                             <div>
                                 <span className="font-bold text-lg text-white">{rule.name}</span>
                                 <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded">{rule.signal}</span>
                             </div>
-                            <div className="flex items-center space-x-4">
-                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center cursor-pointer">
+                            {/* ✅ CHANGED: Action buttons now stack on mobile and have better spacing */}
+                            <div className="flex flex-col items-stretch gap-3 mt-4 sm:flex-row sm:items-center sm:gap-4 sm:mt-0">
+                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between sm:justify-start cursor-pointer">
                                     <span className="mr-3 text-sm text-[var(--text-secondary)]">Telegram Alert</span>
                                     <div className="relative">
-                                        <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)}/>
+                                        <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)} disabled={deletingId === rule.id}/>
                                         <div className="block bg-gray-600 w-10 h-6 rounded-full"></div>
-                                        <div className={`dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full`}></div>
+                                        <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
                                     </div>
                                 </label>
-                                <button onClick={() => handleEditClick(rule)} className="text-blue-400 hover:text-blue-300 font-semibold">Edit</button>
-                                <button onClick={() => handleDelete(rule.id)} className="text-red-500 hover:text-red-400 font-semibold">Delete</button>
+                                <button onClick={() => handleEditClick(rule)} className="text-center sm:text-left text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>Edit</button>
+                                {/* ✅ CHANGED: Removed fixed width 'w-24' for better flexibility */}
+                                <button onClick={() => handleDelete(rule.id)} className="text-center sm:text-left text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed" disabled={deletingId === rule.id}>
+                                    {deletingId === rule.id ? 'Deleting...' : 'Delete'}
+                                </button>
                             </div>
                         </li>
                     ))}</ul>
@@ -1242,4 +1147,142 @@ function RuleBuilder() {
 }
 
 export default RuleBuilder;
+
+
+
+================================================================================
+# 📄 frontend/src/components/Dashboard.jsx
+================================================================================
+
+// frontend/src/components/Dashboard.jsx
+
+import { useState, useEffect } from 'react';
+import { getSignals, getRules } from '../apiService';
+
+// A small SVG component for the refresh spinner
+const RefreshSpinner = () => (
+    <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>
+);
+
+function Dashboard() {
+    const [signals, setSignals] = useState([]);
+    const [rules, setRules] = useState([]);
+    const [initialLoading, setInitialLoading] = useState(true);
+    const [isRefreshing, setIsRefreshing] = useState(false);
+
+    const [activeRuleFilter, setActiveRuleFilter] = useState('all');
+    const [showNoSignal, setShowNoSignal] = useState(false);
+    const [lastUpdated, setLastUpdated] = useState(new Date());
+
+    useEffect(() => {
+        const fetchAllData = async () => {
+            if (!initialLoading) {
+                setIsRefreshing(true);
+            }
+
+            try {
+                const [signalsResponse, rulesResponse] = await Promise.all([getSignals(), getRules()]);
+                const signalsArray = Object.entries(signalsResponse.data).map(([symbol, data]) => ({
+                    symbol,
+                    signal: data.signal,
+                    rule_name: data.rule_name,
+                }));
+                setSignals(signalsArray);
+                setRules(rulesResponse.data);
+                setLastUpdated(new Date());
+            } catch (error) {
+                console.error('Error fetching dashboard data:', error);
+            } finally {
+                if (initialLoading) setInitialLoading(false);
+                setIsRefreshing(false);
+            }
+        };
+
+        fetchAllData();
+        const interval = setInterval(fetchAllData, 15000);
+        return () => clearInterval(interval);
+    }, [initialLoading]); // Changed dependency to re-run only on initial load state change
+
+    const filteredSignals = signals.filter(s => {
+        const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
+        const signalMatch = showNoSignal || s.signal !== 'NO_SIGNAL';
+        return ruleMatch && signalMatch;
+    });
+
+    if (initialLoading) {
+        return <p className="text-center text-[var(--text-secondary)] mt-20 text-lg">Initializing Signal Matrix...</p>;
+    }
+
+    return (
+        <div className="container mx-auto p-4 md:p-6">
+            <div className="text-center mb-6">
+                 {/* ✅ CHANGED: Responsive text size for consistency */}
+                <h1 className="text-3xl md:text-4xl font-extrabold text-white">Signal Dashboard</h1>
+                <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
+                    {isRefreshing && <RefreshSpinner />}
+                    <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
+                </div>
+            </div>
+
+            <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
+                {/* This responsive pattern is already great for mobile */}
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center flex-wrap gap-2">
+                        <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
+                        <button
+                            onClick={() => setActiveRuleFilter('all')}
+                            className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
+                            All Signals
+                        </button>
+                        {rules.map(rule => (
+                            <button
+                                key={rule.id}
+                                onClick={() => setActiveRuleFilter(rule.name)}
+                                className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${activeRuleFilter === rule.name ? 'bg-blue-600 text-white' : 'bg-[var(--bg-dark-primary)] hover:bg-gray-700'}`}>
+                                {rule.name}
+                            </button>
+                        ))}
+                    </div>
+
+                    <label htmlFor="showNoSignal" className="flex items-center cursor-pointer">
+                        <span className="mr-3 text-sm text-[var(--text-secondary)]">Show 'NO_SIGNAL'</span>
+                        <div className="relative">
+                            <input type="checkbox" id="showNoSignal" className="sr-only" checked={showNoSignal} onChange={e => setShowNoSignal(e.target.checked)} />
+                            <div className="block bg-gray-600 w-10 h-6 rounded-full"></div>
+                            <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+                {filteredSignals.map(({ symbol, signal, rule_name }) => {
+                    const isBuy = signal.includes('BUY');
+                    const isSell = signal.includes('SELL');
+                    const signalColorClass = isBuy ? 'text-[var(--accent-buy)]' : isSell ? 'text-[var(--accent-sell)]' : 'text-[var(--text-secondary)]';
+                    const signalBgClass = isBuy ? 'bg-[var(--accent-buy-bg)]' : isSell ? 'bg-[var(--accent-sell-bg)]' : 'bg-gray-700/20';
+                    const borderColorClass = isBuy ? 'border-[var(--accent-buy)]' : isSell ? 'border-[var(--accent-sell)]' : 'border-[var(--border-color)]';
+
+                    return (
+                        <div key={symbol} className={`bg-[var(--bg-dark-secondary)] rounded-lg shadow-xl border-l-4 ${borderColorClass} p-5 flex flex-col justify-between transition-transform transform hover:scale-105`}>
+                            <div>
+                                <div className="font-bold text-2xl text-white mb-2">{symbol}</div>
+                                <div className={`font-semibold text-lg ${signalColorClass} mb-3`}>{signal}</div>
+                            </div>
+                            <div className={`text-xs text-right text-[var(--text-secondary)] italic p-2 rounded-md ${signalBgClass}`}>
+                                {rule_name || 'N/A'}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+export default Dashboard;
+
 
