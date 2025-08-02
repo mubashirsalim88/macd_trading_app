@@ -40,7 +40,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
 from api.logic_evaluator import get_signals_from_redis, debug_single_rule
-from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
+from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule, get_rule_by_id # <-- CHANGE #1: ADD THIS IMPORT
 import json
 from dotenv import load_dotenv
 from typing import List, Optional, cast
@@ -162,23 +162,26 @@ def get_signals():
     if auth_error:
         return auth_error
     try:
-        signals = get_signals_from_redis()
-        return jsonify(signals), 200
+        signals_data = get_signals_from_redis()
+        return jsonify(signals_data), 200
     except Exception:
         error_trace = traceback.format_exc()
         print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
-@app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
-def debug_rule(ticker):
+# <-- CHANGE #2: THIS ROUTE HAS BEEN MODIFIED -->
+@app.route('/api/debug/rule/<string:rule_id>/<string:ticker>', methods=['GET'])
+def debug_rule(rule_id, ticker):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-    all_rules = get_all_rules()
-    if not all_rules:
-        return jsonify({"error": "No rules found in the database to debug."}), 404
-    first_rule = all_rules[0]
-    debug_result = debug_single_rule(first_rule, ticker)
+    
+    # Fetch the specific rule by its ID
+    rule_to_debug = get_rule_by_id(rule_id)
+    if not rule_to_debug:
+        return jsonify({"error": f"Rule with ID '{rule_id}' not found."}), 404
+
+    debug_result = debug_single_rule(rule_to_debug, ticker)
     return jsonify(debug_result)
 
 if __name__ == "__main__":
@@ -190,11 +193,21 @@ if __name__ == "__main__":
 ================================================================================
 
 # api/firestore_client.py
+
 from google.cloud import firestore
 
 # The library will now automatically use the VM's service account permissions
 db = firestore.Client()
 rules_collection = db.collection('rules')
+
+# <-- CHANGE #1: ADD THIS NEW FUNCTION -->
+def get_rule_by_id(rule_id: str):
+    """Fetches a single rule document by its ID."""
+    doc_ref = rules_collection.document(rule_id)
+    doc = doc_ref.get()
+    if doc.exists:
+        return doc.to_dict()
+    return None
 
 def get_all_rules():
     """Fetches all documents from the 'rules' collection."""
@@ -220,7 +233,6 @@ def delete_rule(rule_id: str):
     rules_collection.document(rule_id).delete()
 
 
-
 ================================================================================
 # 📄 api\logic_evaluator.py
 ================================================================================
@@ -233,30 +245,33 @@ from api.firestore_client import get_all_rules
 from api.notifications import send_telegram_message
 import json
 import datetime
+import logging
+from typing import cast, List, Dict, Optional # <-- CHANGE: Added 'cast', 'List', 'Dict', 'Optional'
 
-# --- THIS FUNCTION IS MODIFIED ---
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
 def save_signals_to_redis(signals):
     try:
-        # Add a timestamp to the signals data
         signals['last_updated'] = datetime.datetime.now().isoformat()
-        r.set('latest_signals', json.dumps(signals))  # type: ignore
+        r.set('latest_signals', json.dumps(signals))
+        logging.info("Saved latest signals to Redis.")
     except Exception as e:
-        print(f"[REDIS ERROR] Failed to save latest signals: {e}")
+        logging.error(f"[REDIS ERROR] Failed to save latest signals: {e}")
 
-# --- THIS FUNCTION IS MODIFIED ---
 def get_signals_from_redis():
     try:
-        raw = r.get('latest_signals')  # type: ignore
+        raw = r.get('latest_signals')
         if raw:
-            return json.loads(raw.decode('utf-8'))  # type: ignore
+            # ✅ FIX: Explicitly cast the result to bytes before decoding.
+            raw_bytes = cast(bytes, raw)
+            return json.loads(raw_bytes.decode('utf-8'))
     except Exception as e:
-        print(f"[REDIS ERROR] Failed to get latest signals: {e}")
-    # Return a default structure with a timestamp
+        logging.error(f"[REDIS ERROR] Failed to get latest signals: {e}")
     return {
         'last_updated': datetime.datetime.now().isoformat(),
         'signals': {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
     }
-
 
 def get_operand_value(operand, ticker):
     """Recursively resolves the value of an operand."""
@@ -289,7 +304,6 @@ def get_operand_value(operand, ticker):
 
     return None
 
-
 def evaluate_single_rule(rule, ticker):
     """Evaluates a full rule with all its conditions for a given ticker."""
     if 'conditions' not in rule or not isinstance(rule['conditions'], list):
@@ -319,58 +333,64 @@ def evaluate_single_rule(rule, ticker):
 
     return True
 
-
-# --- THIS FUNCTION IS MODIFIED ---
-def evaluate_all_tickers(send_notifications=False):
+# --- CHANGE #1: THIS NEW FUNCTION REPLACES evaluate_all_tickers() ---
+def evaluate_single_ticker(ticker, send_notifications=False):
     """
-    Loads all rules and evaluates them.
-    If send_notifications is True, it will send Telegram alerts.
+    Loads all rules and evaluates them for a single ticker.
+    If a signal is generated, it will send a Telegram alert.
     """
     all_rules = get_all_rules()
-    signals = {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
     
-    # Get previous signals to avoid re-sending alerts
-    previous_signals = get_signals_from_redis()
+    # Get the existing signals and update only the current ticker
+    current_signals = get_signals_from_redis()
+    
+    # Initialize a new signal for the current ticker
+    signal_for_ticker = {"signal": "NO_SIGNAL", "rule_name": None}
 
     if not all_rules:
-        # Save an empty signal list but with a timestamp
-        save_signals_to_redis({'signals': signals})
-        return {'signals': signals}
+        # Update and save if no rules exist
+        current_signals['signals'][ticker] = signal_for_ticker
+        save_signals_to_redis(current_signals)
+        return current_signals
 
-    for ticker in CRYPTO_TICKERS:
-        for rule in all_rules:
-            if evaluate_single_rule(rule, ticker):
-                current_signal = rule['signal']
-                current_rule_name = rule.get('name', 'Unnamed Rule')
+    for rule in all_rules:
+        if evaluate_single_rule(rule, ticker):
+            current_signal = rule['signal']
+            current_rule_name = rule.get('name', 'Unnamed Rule')
 
-                signals[ticker]['signal'] = current_signal
-                signals[ticker]['rule_name'] = current_rule_name
+            signal_for_ticker['signal'] = current_signal
+            signal_for_ticker['rule_name'] = current_rule_name
 
-                # Check if this is a NEW signal before sending an alert
-                previous_ticker_signal = previous_signals.get('signals', {}).get(ticker, {}).get('signal', 'NO_SIGNAL')
-                
-                if send_notifications and rule.get('telegram_enabled', False) and current_signal != previous_ticker_signal:
-                    rule_name_safe = current_rule_name.replace('-', '\\-').replace('.', '\\.')
-                    ticker_safe = ticker.replace('-', '\\-')
-                    signal_safe = current_signal.replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
+            # Check if this is a NEW signal before sending an alert
+            previous_ticker_signal = current_signals.get('signals', {}).get(ticker, {}).get('signal', 'NO_SIGNAL')
+            
+            if send_notifications and rule.get('telegram_enabled', False) and current_signal != previous_ticker_signal:
+                logging.info(f"✅ SIGNAL DETECTED: Ticker={ticker}, Signal={current_signal}, Rule={current_rule_name}")
+                logging.info("Triggering conditions:")
+                for condition in rule['conditions']:
+                    val1 = get_operand_value(condition.get('operand1'), ticker)
+                    val2 = get_operand_value(condition.get('operand2'), ticker)
+                    logging.info(f" -> {condition.get('operand1', {}).get('value')} {condition['operator']} {condition.get('operand2', {}).get('value')} -> {val1} {condition['operator']} {val2} is TRUE")
 
-                    message = (
-                        f"🚨 *NNTE Signal Alert* 🚨\n\n"
-                        f"*Ticker:* `{ticker_safe}`\n"
-                        f"*Signal:* `{signal_safe}`\n"
-                        f"*Rule:* `{rule_name_safe}`"
-                    )
-                    send_telegram_message(message)
-                
-                break
+                rule_name_safe = current_rule_name.replace('-', '\\-').replace('.', '\\.')
+                ticker_safe = ticker.replace('-', '\\-')
+                signal_safe = current_signal.replace('-', '\\-').replace('(', '\\(').replace(')', '\\)')
 
-    # Always save the latest signals after evaluation
-    save_signals_to_redis({'signals': signals})
-    return {'signals': signals}
-
+                message = (
+                    f"🚨 *NNTE Signal Alert* 🚨\n\n"
+                    f"*Ticker:* `{ticker_safe}`\n"
+                    f"*Signal:* `{signal_safe}`\n"
+                    f"*Rule:* `{rule_name_safe}`"
+                )
+                send_telegram_message(message)
+            
+            break
+    
+    current_signals['signals'][ticker] = signal_for_ticker
+    save_signals_to_redis(current_signals)
+    return current_signals
 
 def debug_single_rule(rule, ticker):
-    # This function remains unchanged
     if 'id' not in rule:
         return {"error": "Rule has no ID"}
 
@@ -529,98 +549,184 @@ def get_historical_data(ticker, period='6mo', interval='1d'):
 
 
 ================================================================================
-# 📄 src\engine.py
-================================================================================
-
-# src/engine.py
-
-from src.data_fetcher import get_historical_data
-from src.indicator_calculator import add_macd
-from src.config import CRYPTO_TICKERS, MACD_PARAMS
-from src.redis_client import save_macd_to_redis
-import pandas as pd
-from api.logic_evaluator import evaluate_all_tickers
-from typing import cast
-
-
-def main():
-    print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
-
-    for ticker in CRYPTO_TICKERS:
-        for interval, param_list in MACD_PARAMS.items():
-            df = get_historical_data(ticker, period="7d", interval=interval)
-            if df.empty:
-                print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
-                continue
-
-            for fast, slow, signal in param_list:
-                df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
-                if df_macd.empty:
-                    continue
-
-                last_three = df_macd.tail(3)
-                if len(last_three) < 3:
-                    continue
-
-                data_to_save = []
-                for idx, row in last_three.iterrows():
-                    # Cast idx to Timestamp so .date() is recognized
-                    ts = cast(pd.Timestamp, idx)
-                    date_str = str(ts.date())
-                    data_to_save.append({
-                        # ✅ FIX: Use .item() to safely get the scalar value from the Series
-                        "macd_line": float(row.macd_line.item()),
-                        "signal_line": float(row.signal_line.item()),
-                        "histogram": float(row.histogram.item()),
-                        "date": date_str
-                    })
-
-                save_macd_to_redis(
-                    ticker,
-                    interval,
-                    {"fast": fast, "slow": slow, "signal": signal},
-                    data_to_save
-                )
-
-    print("\n✅ [INFO] Full scan complete.\n")
-    evaluate_all_tickers(send_notifications=True)
-
-
-if __name__ == "__main__":
-    main()
-
-
-================================================================================
 # 📄 src\indicator_calculator.py
 ================================================================================
 
-# indicator_calculator.py
-
 import pandas as pd
+from src.redis_client import get_macd_from_redis, save_macd_to_redis
+import logging
+from typing import List, Dict, cast, Tuple
 
+# This function is now used to calculate the new MACD values incrementally
+def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, int], new_close: float) -> List[Dict]:
+    fast, slow, signal = params
+    
+    key_params = {"fast": fast, "slow": slow, "signal": signal}
+    
+    existing_data = get_macd_from_redis(ticker, interval, key_params)
+    
+    if existing_data:
+        from src.data_fetcher import get_historical_data
+        df = get_historical_data(ticker, period="10m", interval=interval)
+        if df.empty or len(df) <= slow:
+            logging.warning(f"[INSUFFICIENT DATA] Skipping incremental MACD for {ticker} ({interval}).")
+            return []
+            
+        df['close'] = df['Close']
+        df['fast_ema'] = df['close'].ewm(span=fast, adjust=False).mean()
+        df['slow_ema'] = df['close'].ewm(span=slow, adjust=False).mean()
+        df['macd_line'] = df['fast_ema'] - df['slow_ema']
+        df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
+        df['histogram'] = df['macd_line'] - df['signal_line']
+        
+        last_three = df.tail(3)
+        if len(last_three) < 3:
+            return []
+        
+        data_to_save = []
+        # Explicitly cast idx to pd.Timestamp
+        for idx, row in last_three.iterrows():
+            ts = cast(pd.Timestamp, idx)
+            date_str = str(ts.date())
+            data_to_save.append({
+                "macd_line": float(row.macd_line.item()),
+                "signal_line": float(row.signal_line.item()),
+                "histogram": float(row.histogram.item()),
+                "date": date_str
+            })
+            
+        save_macd_to_redis(ticker, interval, key_params, data_to_save)
+        return data_to_save
+        
+    else:
+        from src.data_fetcher import get_historical_data
+        df = get_historical_data(ticker, period="7d", interval=interval)
+        if df.empty or len(df) <= slow:
+            logging.warning(f"[INSUFFICIENT DATA] Skipping initial MACD calculation for {ticker} ({interval}).")
+            return []
+            
+        df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
+        
+        last_three = df_macd.tail(3)
+        if len(last_three) < 3:
+            return []
+
+        data_to_save = []
+        # Explicitly cast idx to pd.Timestamp
+        for idx, row in last_three.iterrows():
+            ts = cast(pd.Timestamp, idx)
+            date_str = str(ts.date())
+            data_to_save.append({
+                "macd_line": float(row.macd_line.item()),
+                "signal_line": float(row.signal_line.item()),
+                "histogram": float(row.histogram.item()),
+                "date": date_str
+            })
+            
+        save_macd_to_redis(ticker, interval, key_params, data_to_save)
+        return data_to_save
+
+# The original add_macd function is still useful for initial historical calculations.
 def add_macd(df, fast=12, slow=26, signal=9):
-    # ✅ Check if there's enough data for the calculation
-    # The slow EMA requires the most data, so we check against that.
     if len(df) <= slow:
-        print(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
-        return pd.DataFrame() # Return an empty DataFrame to signal failure
+        logging.warning(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
+        return pd.DataFrame()
 
     if 'Close' not in df.columns:
-        print("[Error] 'Close' column not found in DataFrame.")
+        logging.error("[Error] 'Close' column not found in DataFrame.")
         return df
 
-    # Calculate EMAs
     df['fast_ema'] = df['Close'].ewm(span=fast, adjust=False).mean()
     df['slow_ema'] = df['Close'].ewm(span=slow, adjust=False).mean()
-
-    # MACD and Signal
     df['macd_line'] = df['fast_ema'] - df['slow_ema']
     df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
-
-    # Histogram
     df['histogram'] = df['macd_line'] - df['signal_line']
-
     return df
+
+
+
+================================================================================
+# 📄 src\realtime_engine.py
+================================================================================
+
+# src/realtime_engine.py
+
+from binance import ThreadedWebsocketManager
+import pandas as pd
+from typing import Dict
+from src.config import CRYPTO_TICKERS, MACD_PARAMS
+from src.redis_client import r
+from src.indicator_calculator import update_macd_incremental
+from api.logic_evaluator import evaluate_single_ticker
+import json
+import logging
+
+class RealtimeEngine:
+    def __init__(self):
+        self.twm = ThreadedWebsocketManager()
+        self.twm.start()
+        self.streams = self._get_all_streams()
+
+    def _get_all_streams(self):
+        streams = []
+        for ticker in CRYPTO_TICKERS:
+            # Normalize ticker for Binance streams (e.g., BTC-USD -> btcusdt)
+            symbol = ticker.lower().replace('-', '')
+            for interval in MACD_PARAMS.keys():
+                streams.append(f'{symbol}@kline_{interval}')
+        return streams
+
+    def _handle_socket_message(self, msg):
+        """
+        Processes a new kline message from the WebSocket.
+        This function will be the core of our real-time processing.
+        """
+        try:
+            kline = msg['k']
+            is_candle_closed = kline['x']
+            if not is_candle_closed:
+                # We only want to process closed candles to avoid false signals
+                return
+
+            symbol = kline['s'] # e.g., 'BTCUSDT'
+            interval = kline['i'] # e.g., '1m'
+            close_price = float(kline['c'])
+
+            ticker = symbol.upper().replace('USDT', '-USD') # e.g., 'BTC-USD'
+            
+            # Retrieve the relevant MACD parameters for this interval
+            macd_params_list = MACD_PARAMS.get(interval, [])
+
+            for fast, slow, signal in macd_params_list:
+                # Update MACD values for a single parameter set
+                new_macd_data = update_macd_incremental(
+                    ticker,
+                    interval,
+                    (fast, slow, signal),
+                    close_price
+                )
+                
+            # After all MACD indicators are updated for this ticker, evaluate the rules
+            evaluate_single_ticker(ticker, send_notifications=True)
+            
+            logging.info(f"Processed closed candle for {ticker} on interval {interval}. Rules evaluated.")
+
+        except KeyError:
+            # Sometimes the first message can be malformed
+            return
+        except Exception as e:
+            logging.error(f"[WEBSOCKET ERROR] Failed to process message: {e}")
+
+    def start(self):
+        """
+        Starts the WebSocket streams and enters a blocking state.
+        This replaces the role of the scheduler in the old setup.
+        """
+        # Subscribe to all streams and register a single handler
+        self.twm.start_multiplex_socket(callback=self._handle_socket_message, streams=self.streams)
+        
+        # This blocks forever, but the twm runs in separate threads
+        self.twm.join()
 
 
 ================================================================================
@@ -896,14 +1002,19 @@ function Dashboard() {
 
             try {
                 const [signalsResponse, rulesResponse] = await Promise.all([getSignals(), getRules()]);
-                const signalsArray = Object.entries(signalsResponse.data).map(([symbol, data]) => ({
+                const signalData = signalsResponse.data.signals || {};
+                const lastUpdatedTimestamp = signalsResponse.data.last_updated;
+
+                const signalsArray = Object.entries(signalData).map(([symbol, data]) => ({
                     symbol,
                     signal: data.signal,
                     rule_name: data.rule_name,
                 }));
                 setSignals(signalsArray);
                 setRules(rulesResponse.data);
-                setLastUpdated(new Date());
+                if (lastUpdatedTimestamp) {
+                    setLastUpdated(new Date(lastUpdatedTimestamp));
+                }
             } catch (error) {
                 console.error('Error fetching dashboard data:', error);
             } finally {
@@ -915,7 +1026,7 @@ function Dashboard() {
         fetchAllData();
         const interval = setInterval(fetchAllData, 15000);
         return () => clearInterval(interval);
-    }, [initialLoading]); // Changed dependency to re-run only on initial load state change
+    }, [initialLoading]);
 
     const filteredSignals = signals.filter(s => {
         const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
@@ -930,19 +1041,15 @@ function Dashboard() {
     return (
         <div className="container mx-auto p-4 md:p-6">
             <div className="text-center mb-6">
-                     {/* ✅ CHANGED: Responsive text size for consistency */}
                 <h1 className="text-3xl md:text-4xl font-extrabold text-white">Signal Dashboard</h1>
                 <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
                     {isRefreshing && <RefreshSpinner />}
-                    <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
+                    <span>Last updated: {lastUpdated.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span> {/* ✅ FIX: Use toLocaleString for IST */}
                 </div>
             </div>
 
             <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
-                {/* This responsive pattern is already great for mobile */}
-                {/* IMPROVEMENT: Ensure filters stack on mobile, then go horizontal on small screens+ */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                    {/* IMPROVEMENT: Filter buttons wrap if needed */}
                     <div className="flex items-center flex-wrap gap-2 justify-center sm:justify-start">
                         <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
                         <button
