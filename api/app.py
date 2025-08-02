@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
 from api.logic_evaluator import get_signals_from_redis, debug_single_rule
-from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule, get_rule_by_id # <-- CHANGE #1: ADD THIS IMPORT
+from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule, get_rule_by_id
 import json
 from dotenv import load_dotenv
 from typing import List, Optional, cast
@@ -99,7 +99,6 @@ def get_data(ticker: str):
     if auth_error:
         return auth_error
     try:
-        # Cast to List[bytes] so Pylance knows it's iterable
         raw_keys = cast(List[bytes], r.keys(f"{ticker}:*"))
         if not raw_keys:
             return jsonify({"error": f"No data found for {ticker}"}), 404
@@ -136,14 +135,12 @@ def get_signals():
         print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
-# <-- CHANGE #2: THIS ROUTE HAS BEEN MODIFIED -->
 @app.route('/api/debug/rule/<string:rule_id>/<string:ticker>', methods=['GET'])
 def debug_rule(rule_id, ticker):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
     
-    # Fetch the specific rule by its ID
     rule_to_debug = get_rule_by_id(rule_id)
     if not rule_to_debug:
         return jsonify({"error": f"Rule with ID '{rule_id}' not found."}), 404

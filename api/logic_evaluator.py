@@ -7,7 +7,7 @@ from api.notifications import send_telegram_message
 import json
 import datetime
 import logging
-from typing import cast, List, Dict, Optional # <-- CHANGE: Added 'cast', 'List', 'Dict', 'Optional'
+from typing import cast, List, Dict, Optional
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -24,7 +24,6 @@ def get_signals_from_redis():
     try:
         raw = r.get('latest_signals')
         if raw:
-            # ✅ FIX: Explicitly cast the result to bytes before decoding.
             raw_bytes = cast(bytes, raw)
             return json.loads(raw_bytes.decode('utf-8'))
     except Exception as e:
@@ -94,7 +93,6 @@ def evaluate_single_rule(rule, ticker):
 
     return True
 
-# --- CHANGE #1: THIS NEW FUNCTION REPLACES evaluate_all_tickers() ---
 def evaluate_single_ticker(ticker, send_notifications=False):
     """
     Loads all rules and evaluates them for a single ticker.
@@ -102,14 +100,11 @@ def evaluate_single_ticker(ticker, send_notifications=False):
     """
     all_rules = get_all_rules()
     
-    # Get the existing signals and update only the current ticker
     current_signals = get_signals_from_redis()
     
-    # Initialize a new signal for the current ticker
     signal_for_ticker = {"signal": "NO_SIGNAL", "rule_name": None}
 
     if not all_rules:
-        # Update and save if no rules exist
         current_signals['signals'][ticker] = signal_for_ticker
         save_signals_to_redis(current_signals)
         return current_signals
@@ -122,7 +117,6 @@ def evaluate_single_ticker(ticker, send_notifications=False):
             signal_for_ticker['signal'] = current_signal
             signal_for_ticker['rule_name'] = current_rule_name
 
-            # Check if this is a NEW signal before sending an alert
             previous_ticker_signal = current_signals.get('signals', {}).get(ticker, {}).get('signal', 'NO_SIGNAL')
             
             if send_notifications and rule.get('telegram_enabled', False) and current_signal != previous_ticker_signal:

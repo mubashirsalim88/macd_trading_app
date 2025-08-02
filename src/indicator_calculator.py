@@ -1,7 +1,7 @@
 import pandas as pd
 from src.redis_client import get_macd_from_redis, save_macd_to_redis
 import logging
-from typing import List, Dict, cast, Tuple
+from typing import List, Dict, cast, Union, Tuple
 
 # This function is now used to calculate the new MACD values incrementally
 def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, int], new_close: float) -> List[Dict]:
@@ -30,7 +30,6 @@ def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, 
             return []
         
         data_to_save = []
-        # Explicitly cast idx to pd.Timestamp
         for idx, row in last_three.iterrows():
             ts = cast(pd.Timestamp, idx)
             date_str = str(ts.date())
@@ -58,7 +57,6 @@ def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, 
             return []
 
         data_to_save = []
-        # Explicitly cast idx to pd.Timestamp
         for idx, row in last_three.iterrows():
             ts = cast(pd.Timestamp, idx)
             date_str = str(ts.date())
@@ -72,7 +70,6 @@ def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, 
         save_macd_to_redis(ticker, interval, key_params, data_to_save)
         return data_to_save
 
-# The original add_macd function is still useful for initial historical calculations.
 def add_macd(df, fast=12, slow=26, signal=9):
     if len(df) <= slow:
         logging.warning(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")

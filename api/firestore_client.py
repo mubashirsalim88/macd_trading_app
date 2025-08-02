@@ -6,7 +6,6 @@ from google.cloud import firestore
 db = firestore.Client()
 rules_collection = db.collection('rules')
 
-# <-- CHANGE #1: ADD THIS NEW FUNCTION -->
 def get_rule_by_id(rule_id: str):
     """Fetches a single rule document by its ID."""
     doc_ref = rules_collection.document(rule_id)
@@ -29,9 +28,8 @@ def save_rule(rule_data: dict):
 def update_rule(rule_id: str, rule_data: dict):
     """Updates an existing rule in Firestore."""
     doc_ref = rules_collection.document(rule_id)
-    # Ensure the ID from the URL is used and saved in the document
     rule_data['id'] = rule_id
-    doc_ref.set(rule_data) # set() with an existing doc ID overwrites it
+    doc_ref.set(rule_data)
     return rule_data
 
 def delete_rule(rule_id: str):
