@@ -1,64 +1,76 @@
-# src/realtime_engine.py
-
-from binance import ThreadedWebsocketManager
-import pandas as pd
-from typing import Dict
-from src.config import CRYPTO_TICKERS, MACD_PARAMS
-from src.redis_client import r
-from src.indicator_calculator import update_macd_incremental
-from api.logic_evaluator import evaluate_single_ticker
+from binance.websocket.spot.websocket_client import SpotWebsocketClient  # type: ignore
 import json
 import logging
+from src.config import CRYPTO_TICKERS, MACD_PARAMS
+from src.indicator_calculator import update_macd_incremental
+from api.logic_evaluator import evaluate_single_ticker
 
 class RealtimeEngine:
     def __init__(self):
-        self.twm = ThreadedWebsocketManager()
-        self.twm.start()
+        # Prepare the list of Binance stream endpoints for each ticker/interval
         self.streams = self._get_all_streams()
+        self.client = None
 
     def _get_all_streams(self):
         streams = []
         for ticker in CRYPTO_TICKERS:
-            # Binance stream symbols are lowercase
             symbol = ticker.lower()
             for interval in MACD_PARAMS.keys():
-                streams.append(f'{symbol}@kline_{interval}')
+                streams.append(f"{symbol}@kline_{interval}")
         return streams
 
     def _handle_socket_message(self, msg):
+        """
+        Handle incoming WebSocket messages, process closed kline events,
+        update MACD values, and evaluate trade logic.
+        """
         try:
-            kline = msg['k']
-            is_candle_closed = kline['x']
-            if not is_candle_closed:
-                return
+            if 'stream' in msg and 'data' in msg:
+                data = msg['data']
+                # Only process kline events
+                if data.get('e') == 'kline':
+                    kline = data['k']
+                    # Only on candle close
+                    if not kline.get('x', False):
+                        return
 
-            symbol = kline['s'] # e.g., 'BTCUSDT'
-            interval = kline['i'] # e.g., '1m'
-            close_price = float(kline['c'])
+                    symbol = kline['s']  # e.g., 'BTCUSDT'
+                    interval = kline['i']  # e.g., '1m'
+                    close_price = float(kline['c'])
+                    ticker = symbol.upper()
 
-            # ✅ FIX: Use the symbol directly from the kline message
-            ticker = symbol.upper()
-            
-            # Retrieve the relevant MACD parameters for this interval
-            macd_params_list = MACD_PARAMS.get(interval, [])
+                    # Update MACD for each parameter set
+                    for fast, slow, signal in MACD_PARAMS.get(interval, []):
+                        update_macd_incremental(
+                            ticker,
+                            interval,
+                            (fast, slow, signal),
+                            close_price
+                        )
 
-            for fast, slow, signal in macd_params_list:
-                new_macd_data = update_macd_incremental(
-                    ticker,
-                    interval,
-                    (fast, slow, signal),
-                    close_price
-                )
-                
-            evaluate_single_ticker(ticker, send_notifications=True)
-            
-            logging.info(f"Processed closed candle for {ticker} on interval {interval}. Rules evaluated.")
-
+                    # Evaluate trading rules and optionally notify
+                    evaluate_single_ticker(ticker, send_notifications=True)
+                    logging.info(f"Processed closed candle for {ticker} on {interval}. Rules evaluated.")
         except KeyError:
-            return
+            logging.error(f"[WEBSOCKET ERROR] Malformed message: {msg}")
         except Exception as e:
-            logging.error(f"[WEBSOCKET ERROR] Failed to process message: {e}")
+            logging.error(f"[WEBSOCKET ERROR] Processing failed: {e}")
 
     def start(self):
-        self.twm.start_multiplex_socket(callback=self._handle_socket_message, streams=self.streams)
-        self.twm.join()
+        """
+        Initialize and start the Binance WebSocket client with all kline streams.
+        """
+        # Initialize client, ignoring missing type stubs
+        self.client = SpotWebsocketClient(on_message=self._handle_socket_message)  # type: ignore
+        self.client.start()
+
+        # Subscribe to kline streams for all symbols/intervals
+        symbols = [t.lower() for t in CRYPTO_TICKERS]
+        intervals = list(MACD_PARAMS.keys())
+        # Using multiplex subscription
+        self.client.kline_stream(symbols=symbols, interval=intervals)  # type: ignore
+
+        try:
+            input("Press Enter to stop the client...\n")
+        finally:
+            self.client.stop()  # type: ignore

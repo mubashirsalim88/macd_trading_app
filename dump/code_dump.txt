@@ -6,25 +6,18 @@
 # run.py
 import sys
 import os
-from dotenv import load_dotenv # <-- CHANGE #1: ADD THIS IMPORT
+from dotenv import load_dotenv
 
 # Add the project root to the Python path and load environment variables
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv() # <-- CHANGE #2: ADD THIS LINE
+load_dotenv()
 
-from apscheduler.schedulers.blocking import BlockingScheduler
-from src.engine import main
-
-def job():
-    print("[SCHEDULER] Running scheduled MACD job...\n")
-    main()
+from src.realtime_engine import RealtimeEngine
 
 if __name__ == "__main__":
-    scheduler = BlockingScheduler()
-    scheduler.add_job(job, 'interval', minutes=1)
-    print("[INIT] Starting scheduler to run MACD engine every minute...")
-    scheduler.start()
-
+    print("[INIT] Starting real-time MACD engine...")
+    engine = RealtimeEngine()
+    engine.start()
 
 
 ================================================================================
@@ -40,7 +33,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
 from api.logic_evaluator import get_signals_from_redis, debug_single_rule
-from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule, get_rule_by_id # <-- CHANGE #1: ADD THIS IMPORT
+from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule, get_rule_by_id
 import json
 from dotenv import load_dotenv
 from typing import List, Optional, cast
@@ -132,7 +125,6 @@ def get_data(ticker: str):
     if auth_error:
         return auth_error
     try:
-        # Cast to List[bytes] so Pylance knows it's iterable
         raw_keys = cast(List[bytes], r.keys(f"{ticker}:*"))
         if not raw_keys:
             return jsonify({"error": f"No data found for {ticker}"}), 404
@@ -169,14 +161,12 @@ def get_signals():
         print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
-# <-- CHANGE #2: THIS ROUTE HAS BEEN MODIFIED -->
 @app.route('/api/debug/rule/<string:rule_id>/<string:ticker>', methods=['GET'])
 def debug_rule(rule_id, ticker):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
     
-    # Fetch the specific rule by its ID
     rule_to_debug = get_rule_by_id(rule_id)
     if not rule_to_debug:
         return jsonify({"error": f"Rule with ID '{rule_id}' not found."}), 404
@@ -200,7 +190,6 @@ from google.cloud import firestore
 db = firestore.Client()
 rules_collection = db.collection('rules')
 
-# <-- CHANGE #1: ADD THIS NEW FUNCTION -->
 def get_rule_by_id(rule_id: str):
     """Fetches a single rule document by its ID."""
     doc_ref = rules_collection.document(rule_id)
@@ -223,9 +212,8 @@ def save_rule(rule_data: dict):
 def update_rule(rule_id: str, rule_data: dict):
     """Updates an existing rule in Firestore."""
     doc_ref = rules_collection.document(rule_id)
-    # Ensure the ID from the URL is used and saved in the document
     rule_data['id'] = rule_id
-    doc_ref.set(rule_data) # set() with an existing doc ID overwrites it
+    doc_ref.set(rule_data)
     return rule_data
 
 def delete_rule(rule_id: str):
@@ -246,7 +234,7 @@ from api.notifications import send_telegram_message
 import json
 import datetime
 import logging
-from typing import cast, List, Dict, Optional # <-- CHANGE: Added 'cast', 'List', 'Dict', 'Optional'
+from typing import cast, List, Dict, Optional
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -263,7 +251,6 @@ def get_signals_from_redis():
     try:
         raw = r.get('latest_signals')
         if raw:
-            # ✅ FIX: Explicitly cast the result to bytes before decoding.
             raw_bytes = cast(bytes, raw)
             return json.loads(raw_bytes.decode('utf-8'))
     except Exception as e:
@@ -333,7 +320,6 @@ def evaluate_single_rule(rule, ticker):
 
     return True
 
-# --- CHANGE #1: THIS NEW FUNCTION REPLACES evaluate_all_tickers() ---
 def evaluate_single_ticker(ticker, send_notifications=False):
     """
     Loads all rules and evaluates them for a single ticker.
@@ -341,14 +327,11 @@ def evaluate_single_ticker(ticker, send_notifications=False):
     """
     all_rules = get_all_rules()
     
-    # Get the existing signals and update only the current ticker
     current_signals = get_signals_from_redis()
     
-    # Initialize a new signal for the current ticker
     signal_for_ticker = {"signal": "NO_SIGNAL", "rule_name": None}
 
     if not all_rules:
-        # Update and save if no rules exist
         current_signals['signals'][ticker] = signal_for_ticker
         save_signals_to_redis(current_signals)
         return current_signals
@@ -361,7 +344,6 @@ def evaluate_single_ticker(ticker, send_notifications=False):
             signal_for_ticker['signal'] = current_signal
             signal_for_ticker['rule_name'] = current_rule_name
 
-            # Check if this is a NEW signal before sending an alert
             previous_ticker_signal = current_signals.get('signals', {}).get(ticker, {}).get('signal', 'NO_SIGNAL')
             
             if send_notifications and rule.get('telegram_enabled', False) and current_signal != previous_ticker_signal:
@@ -478,7 +460,6 @@ def send_telegram_message(message: str):
         print(f"[TELEGRAM ERROR] Failed to send message: {e}")
 
 
-
 ================================================================================
 # 📄 src\config.py
 ================================================================================
@@ -486,14 +467,14 @@ def send_telegram_message(message: str):
 # config.py
 
 CRYPTO_TICKERS = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
-    "ADA-USD", "AVAX-USD", "SHIB-USD", "DOT-USD", "LINK-USD", "MATIC-USD",
-    "TRX-USD", "LTC-USD", "BCH-USD", "ICP-USD", "ATOM-USD", "XLM-USD",
-    "ETC-USD", "FIL-USD", "HBAR-USD", "APT-USD", "IMX-USD", "ARB-USD",
-    "CRO-USD", "NEAR-USD", "QNT-USD", "OP-USD", "VET-USD", "RUNE-USD",
-    "AAVE-USD", "GRT-USD", "EGLD-USD", "MKR-USD", "ALGO-USD", "XTZ-USD",
-    "SAND-USD", "THETA-USD", "AXS-USD", "CHZ-USD", "ZEC-USD", "LDO-USD",
-    "FTM-USD"
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
+    "ADAUSDT", "AVAXUSDT", "SHIBUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT",
+    "TRXUSDT", "LTCUSDT", "BCHUSDT", "ICPUSDT", "ATOMUSDT", "XLMUSDT",
+    "ETCUSDT", "FILUSDT", "HBARUSDT", "APTUSDT", "IMXUSDT", "ARBUSDT",
+    "CROUSDT", "NEARUSDT", "QNTUSDT", "OPUSDT", "VETUSDT", "RUNEUSDT",
+    "AAVEUSDT", "GRTUSDT", "EGLDUSDT", "MKRUSDT", "ALGOUSDT", "XTZUSDT",
+    "SANDUSDT", "THETAUSDT", "AXSUSDT", "CHZUSDT", "ZECUSDT", "LDOUSDT",
+    "FTMUSDT"
 ]
 
 MACD_PARAMS = {
@@ -527,25 +508,26 @@ MACD_PARAMS = {
 }
 
 
-
 ================================================================================
 # 📄 src\data_fetcher.py
 ================================================================================
 
 import yfinance as yf
 import pandas as pd
+import logging
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 def get_historical_data(ticker, period='6mo', interval='1d'):
     try:
         df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
         if df is None or df.empty:
-            print(f"[Warning] No data returned for {ticker}.")
+            logging.warning(f"[Warning] No data returned for {ticker}.")
             return pd.DataFrame()
         return df
     except Exception as e:
-        print(f"[Error] Failed to fetch data for {ticker}: {e}")
+        logging.error(f"[Error] Failed to fetch data for {ticker}: {e}")
         return pd.DataFrame()
-
 
 
 ================================================================================
@@ -555,7 +537,7 @@ def get_historical_data(ticker, period='6mo', interval='1d'):
 import pandas as pd
 from src.redis_client import get_macd_from_redis, save_macd_to_redis
 import logging
-from typing import List, Dict, cast, Tuple
+from typing import List, Dict, cast, Union, Tuple
 
 # This function is now used to calculate the new MACD values incrementally
 def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, int], new_close: float) -> List[Dict]:
@@ -584,7 +566,6 @@ def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, 
             return []
         
         data_to_save = []
-        # Explicitly cast idx to pd.Timestamp
         for idx, row in last_three.iterrows():
             ts = cast(pd.Timestamp, idx)
             date_str = str(ts.date())
@@ -612,7 +593,6 @@ def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, 
             return []
 
         data_to_save = []
-        # Explicitly cast idx to pd.Timestamp
         for idx, row in last_three.iterrows():
             ts = cast(pd.Timestamp, idx)
             date_str = str(ts.date())
@@ -626,7 +606,6 @@ def update_macd_incremental(ticker: str, interval: str, params: Tuple[int, int, 
         save_macd_to_redis(ticker, interval, key_params, data_to_save)
         return data_to_save
 
-# The original add_macd function is still useful for initial historical calculations.
 def add_macd(df, fast=12, slow=26, signal=9):
     if len(df) <= slow:
         logging.warning(f"[INSUFFICIENT DATA] SKIPPING MACD({fast},{slow},{signal}). Have {len(df)} candles, need > {slow}.")
@@ -642,7 +621,6 @@ def add_macd(df, fast=12, slow=26, signal=9):
     df['signal_line'] = df['macd_line'].ewm(span=signal, adjust=False).mean()
     df['histogram'] = df['macd_line'] - df['signal_line']
     return df
-
 
 
 ================================================================================
@@ -670,35 +648,30 @@ class RealtimeEngine:
     def _get_all_streams(self):
         streams = []
         for ticker in CRYPTO_TICKERS:
-            # Normalize ticker for Binance streams (e.g., BTC-USD -> btcusdt)
-            symbol = ticker.lower().replace('-', '')
+            # Binance stream symbols are lowercase
+            symbol = ticker.lower()
             for interval in MACD_PARAMS.keys():
                 streams.append(f'{symbol}@kline_{interval}')
         return streams
 
     def _handle_socket_message(self, msg):
-        """
-        Processes a new kline message from the WebSocket.
-        This function will be the core of our real-time processing.
-        """
         try:
             kline = msg['k']
             is_candle_closed = kline['x']
             if not is_candle_closed:
-                # We only want to process closed candles to avoid false signals
                 return
 
             symbol = kline['s'] # e.g., 'BTCUSDT'
             interval = kline['i'] # e.g., '1m'
             close_price = float(kline['c'])
 
-            ticker = symbol.upper().replace('USDT', '-USD') # e.g., 'BTC-USD'
+            # ✅ FIX: Use the symbol directly from the kline message
+            ticker = symbol.upper()
             
             # Retrieve the relevant MACD parameters for this interval
             macd_params_list = MACD_PARAMS.get(interval, [])
 
             for fast, slow, signal in macd_params_list:
-                # Update MACD values for a single parameter set
                 new_macd_data = update_macd_incremental(
                     ticker,
                     interval,
@@ -706,26 +679,17 @@ class RealtimeEngine:
                     close_price
                 )
                 
-            # After all MACD indicators are updated for this ticker, evaluate the rules
             evaluate_single_ticker(ticker, send_notifications=True)
             
             logging.info(f"Processed closed candle for {ticker} on interval {interval}. Rules evaluated.")
 
         except KeyError:
-            # Sometimes the first message can be malformed
             return
         except Exception as e:
             logging.error(f"[WEBSOCKET ERROR] Failed to process message: {e}")
 
     def start(self):
-        """
-        Starts the WebSocket streams and enters a blocking state.
-        This replaces the role of the scheduler in the old setup.
-        """
-        # Subscribe to all streams and register a single handler
         self.twm.start_multiplex_socket(callback=self._handle_socket_message, streams=self.streams)
-        
-        # This blocks forever, but the twm runs in separate threads
         self.twm.join()
 
 
