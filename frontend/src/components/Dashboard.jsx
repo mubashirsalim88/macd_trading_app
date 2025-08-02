@@ -29,14 +29,19 @@ function Dashboard() {
 
             try {
                 const [signalsResponse, rulesResponse] = await Promise.all([getSignals(), getRules()]);
-                const signalsArray = Object.entries(signalsResponse.data).map(([symbol, data]) => ({
+                const signalData = signalsResponse.data.signals || {};
+                const lastUpdatedTimestamp = signalsResponse.data.last_updated;
+
+                const signalsArray = Object.entries(signalData).map(([symbol, data]) => ({
                     symbol,
                     signal: data.signal,
                     rule_name: data.rule_name,
                 }));
                 setSignals(signalsArray);
                 setRules(rulesResponse.data);
-                setLastUpdated(new Date());
+                if (lastUpdatedTimestamp) {
+                    setLastUpdated(new Date(lastUpdatedTimestamp));
+                }
             } catch (error) {
                 console.error('Error fetching dashboard data:', error);
             } finally {
@@ -48,7 +53,7 @@ function Dashboard() {
         fetchAllData();
         const interval = setInterval(fetchAllData, 15000);
         return () => clearInterval(interval);
-    }, [initialLoading]); // Changed dependency to re-run only on initial load state change
+    }, [initialLoading]);
 
     const filteredSignals = signals.filter(s => {
         const ruleMatch = activeRuleFilter === 'all' || s.rule_name === activeRuleFilter;
@@ -63,19 +68,15 @@ function Dashboard() {
     return (
         <div className="container mx-auto p-4 md:p-6">
             <div className="text-center mb-6">
-                     {/* ✅ CHANGED: Responsive text size for consistency */}
                 <h1 className="text-3xl md:text-4xl font-extrabold text-white">Signal Dashboard</h1>
                 <div className="flex items-center justify-center mt-2 text-[var(--text-secondary)]">
                     {isRefreshing && <RefreshSpinner />}
-                    <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
+                    <span>Last updated: {lastUpdated.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span> {/* ✅ FIX: Use toLocaleString for IST */}
                 </div>
             </div>
 
             <div className="bg-[var(--bg-dark-secondary)] border border-[var(--border-color)] p-4 rounded-xl shadow-lg mb-8">
-                {/* This responsive pattern is already great for mobile */}
-                {/* IMPROVEMENT: Ensure filters stack on mobile, then go horizontal on small screens+ */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                    {/* IMPROVEMENT: Filter buttons wrap if needed */}
                     <div className="flex items-center flex-wrap gap-2 justify-center sm:justify-start">
                         <span className="font-semibold text-gray-300 mr-2">Filter by Logic:</span>
                         <button

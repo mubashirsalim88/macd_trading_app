@@ -34,9 +34,10 @@ def main():
                     ts = cast(pd.Timestamp, idx)
                     date_str = str(ts.date())
                     data_to_save.append({
-                        "macd_line": float(row.macd_line),
-                        "signal_line": float(row.signal_line),
-                        "histogram": float(row.histogram),
+                        # ✅ FIX: Use .item() to safely get the scalar value from the Series
+                        "macd_line": float(row.macd_line.item()),
+                        "signal_line": float(row.signal_line.item()),
+                        "histogram": float(row.histogram.item()),
                         "date": date_str
                     })
 

@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
 from api.logic_evaluator import get_signals_from_redis, debug_single_rule
-from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
+from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule, get_rule_by_id # <-- CHANGE #1: ADD THIS IMPORT
 import json
 from dotenv import load_dotenv
 from typing import List, Optional, cast
@@ -129,23 +129,26 @@ def get_signals():
     if auth_error:
         return auth_error
     try:
-        signals = get_signals_from_redis()
-        return jsonify(signals), 200
+        signals_data = get_signals_from_redis()
+        return jsonify(signals_data), 200
     except Exception:
         error_trace = traceback.format_exc()
         print(error_trace)
         return jsonify({"error": "An internal error occurred", "traceback": error_trace}), 500
 
-@app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
-def debug_rule(ticker):
+# <-- CHANGE #2: THIS ROUTE HAS BEEN MODIFIED -->
+@app.route('/api/debug/rule/<string:rule_id>/<string:ticker>', methods=['GET'])
+def debug_rule(rule_id, ticker):
     auth_error = require_api_key()
     if auth_error:
         return auth_error
-    all_rules = get_all_rules()
-    if not all_rules:
-        return jsonify({"error": "No rules found in the database to debug."}), 404
-    first_rule = all_rules[0]
-    debug_result = debug_single_rule(first_rule, ticker)
+    
+    # Fetch the specific rule by its ID
+    rule_to_debug = get_rule_by_id(rule_id)
+    if not rule_to_debug:
+        return jsonify({"error": f"Rule with ID '{rule_id}' not found."}), 404
+
+    debug_result = debug_single_rule(rule_to_debug, ticker)
     return jsonify(debug_result)
 
 if __name__ == "__main__":
