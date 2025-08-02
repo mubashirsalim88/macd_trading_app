@@ -6,6 +6,8 @@ from src.config import CRYPTO_TICKERS, MACD_PARAMS
 from src.redis_client import save_macd_to_redis
 import pandas as pd
 from api.logic_evaluator import evaluate_all_tickers
+from typing import cast
+
 
 def main():
     print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
@@ -17,25 +19,26 @@ def main():
                 print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
                 continue
 
-            for params in param_list:
-                fast, slow, signal = params
+            for fast, slow, signal in param_list:
                 df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
                 if df_macd.empty:
                     continue
 
-                last_three_rows = df_macd.tail(3)
-                if len(last_three_rows) < 3:
+                last_three = df_macd.tail(3)
+                if len(last_three) < 3:
                     continue
 
-                data_to_save = [
-                    {
-                        "macd_line": float(row.macd_line.iloc[0]),
-                        "signal_line": float(row.signal_line.iloc[0]),
-                        "histogram": float(row.histogram.iloc[0]),
-                        "date": str(index.date())
-                    }
-                    for index, row in last_three_rows.iterrows()
-                ]
+                data_to_save = []
+                for idx, row in last_three.iterrows():
+                    # Cast idx to Timestamp so .date() is recognized
+                    ts = cast(pd.Timestamp, idx)
+                    date_str = str(ts.date())
+                    data_to_save.append({
+                        "macd_line": float(row.macd_line),
+                        "signal_line": float(row.signal_line),
+                        "histogram": float(row.histogram),
+                        "date": date_str
+                    })
 
                 save_macd_to_redis(
                     ticker,
@@ -45,8 +48,8 @@ def main():
                 )
 
     print("\n✅ [INFO] Full scan complete.\n")
-    # --- THIS LINE IS MODIFIED ---
-    evaluate_all_tickers(send_notifications=True) 
+    evaluate_all_tickers(send_notifications=True)
+
 
 if __name__ == "__main__":
     main()

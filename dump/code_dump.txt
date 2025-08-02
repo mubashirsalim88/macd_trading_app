@@ -32,21 +32,21 @@ if __name__ == "__main__":
 ================================================================================
 
 # api/app.py
+
 import sys
 import os
 import traceback
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from src.redis_client import r
-# --- MODIFIED IMPORT ---
-from api.logic_evaluator import get_signals_from_redis, debug_single_rule 
+from api.logic_evaluator import get_signals_from_redis, debug_single_rule
 from api.firestore_client import save_rule, get_all_rules, update_rule, delete_rule
 import json
 from dotenv import load_dotenv
-from typing import List, Optional
+from typing import List, Optional, cast
 from src.config import MACD_PARAMS
 
-# Add the project root to the Python path
+# Ensure project root is on path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load API key from environment
@@ -62,18 +62,12 @@ def require_api_key():
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
-# ... (The health_check, get_app_config, and all /api/rules endpoints remain unchanged) ...
-
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok", "message": "API is running"})
 
 @app.route('/api/config', methods=['GET'])
 def get_app_config():
-    """
-    Provides the frontend with dynamic configuration, including only the
-    MACD parameters that can be calculated with 7 days of data.
-    """
     CANDLES_IN_7_DAYS = {
         '1m': 60 * 24 * 7,
         '5m': 12 * 24 * 7,
@@ -94,7 +88,8 @@ def get_app_config():
 @app.route('/api/rules', methods=['POST'])
 def create_rule():
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     rule_data = request.get_json()
     if not rule_data or 'name' not in rule_data:
         return jsonify({"error": "Invalid rule data"}), 400
@@ -104,14 +99,16 @@ def create_rule():
 @app.route('/api/rules', methods=['GET'])
 def list_rules():
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     all_rules = get_all_rules()
     return jsonify(all_rules), 200
 
 @app.route('/api/rules/<string:rule_id>', methods=['PUT'])
 def update_rule_endpoint(rule_id):
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     rule_data = request.get_json()
     if not rule_data:
         return jsonify({"error": "Invalid data"}), 400
@@ -121,7 +118,8 @@ def update_rule_endpoint(rule_id):
 @app.route('/api/rules/<string:rule_id>', methods=['DELETE'])
 def delete_rule_endpoint(rule_id):
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     try:
         delete_rule(rule_id)
         return jsonify({"success": True}), 200
@@ -131,31 +129,39 @@ def delete_rule_endpoint(rule_id):
 @app.route('/api/data/<string:ticker>', methods=['GET'])
 def get_data(ticker: str):
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     try:
-        keys = r.keys(f"{ticker}:*")
-        if not keys: return jsonify({"error": f"No data found for {ticker}"}), 404
+        # Cast to List[bytes] so Pylance knows it's iterable
+        raw_keys = cast(List[bytes], r.keys(f"{ticker}:*"))
+        if not raw_keys:
+            return jsonify({"error": f"No data found for {ticker}"}), 404
+
         result = {ticker: {}}
-        for key in keys:
+        for key in raw_keys:
             key_str = key.decode('utf-8')
             _, interval, params = key_str.split(':')
-            data = r.get(key)
-            if data:
-                data_list = json.loads(data.decode('utf-8'))
-                if isinstance(data_list, list) and len(data_list) == 3:
-                    result[ticker][f"{interval}:{params}"] = data_list
-        if not result[ticker]: return jsonify({"error": f"No valid data found for {ticker}"}), 404
+            data_raw = cast(Optional[bytes], r.get(key))
+            if not data_raw:
+                continue
+
+            data_list = json.loads(data_raw.decode('utf-8'))
+            if isinstance(data_list, list) and len(data_list) == 3:
+                result[ticker][f"{interval}:{params}"] = data_list
+
+        if not result[ticker]:
+            return jsonify({"error": f"No valid data found for {ticker}"}), 404
+
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data for {ticker}: {str(e)}"}), 500
 
-# --- THIS ENDPOINT IS MODIFIED ---
 @app.route('/api/signals', methods=['GET'])
 def get_signals():
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     try:
-        # Simply return the last known signals from Redis
         signals = get_signals_from_redis()
         return jsonify(signals), 200
     except Exception:
@@ -165,9 +171,9 @@ def get_signals():
 
 @app.route('/api/debug/rule/<string:ticker>', methods=['GET'])
 def debug_rule(ticker):
-    # This function remains unchanged
     auth_error = require_api_key()
-    if auth_error: return auth_error
+    if auth_error:
+        return auth_error
     all_rules = get_all_rules()
     if not all_rules:
         return jsonify({"error": "No rules found in the database to debug."}), 404
@@ -177,7 +183,6 @@ def debug_rule(ticker):
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
-
 
 
 ================================================================================
@@ -222,28 +227,25 @@ def delete_rule(rule_id: str):
 
 # api/logic_evaluator.py
 
-from src.redis_client import get_macd_from_redis
+from src.redis_client import get_macd_from_redis, r
 from src.config import CRYPTO_TICKERS
 from api.firestore_client import get_all_rules
 from api.notifications import send_telegram_message
 import json
-from src.redis_client import r # Import the redis client
 
 # --- THIS IS A NEW FUNCTION ---
 def save_signals_to_redis(signals):
-    """Saves the latest evaluated signals to a single key in Redis."""
     try:
-        r.set('latest_signals', json.dumps(signals))
+        r.set('latest_signals', json.dumps(signals))  # type: ignore
     except Exception as e:
         print(f"[REDIS ERROR] Failed to save latest signals: {e}")
 
 # --- THIS IS A NEW FUNCTION ---
 def get_signals_from_redis():
-    """Retrieves the latest signals from Redis."""
     try:
-        signals = r.get('latest_signals')
-        if signals:
-            return json.loads(signals.decode('utf-8'))
+        raw = r.get('latest_signals')  # type: ignore
+        if raw:
+            return json.loads(raw.decode('utf-8'))  # type: ignore
     except Exception as e:
         print(f"[REDIS ERROR] Failed to get latest signals: {e}")
     return {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
@@ -531,6 +533,8 @@ from src.config import CRYPTO_TICKERS, MACD_PARAMS
 from src.redis_client import save_macd_to_redis
 import pandas as pd
 from api.logic_evaluator import evaluate_all_tickers
+from typing import cast
+
 
 def main():
     print("[INFO] Starting full scan of all tickers and MACD parameter sets...\n")
@@ -542,25 +546,26 @@ def main():
                 print(f"[WARNING] No data for {ticker} ({interval}) — skipping.")
                 continue
 
-            for params in param_list:
-                fast, slow, signal = params
+            for fast, slow, signal in param_list:
                 df_macd = add_macd(df.copy(), fast=fast, slow=slow, signal=signal)
                 if df_macd.empty:
                     continue
 
-                last_three_rows = df_macd.tail(3)
-                if len(last_three_rows) < 3:
+                last_three = df_macd.tail(3)
+                if len(last_three) < 3:
                     continue
 
-                data_to_save = [
-                    {
-                        "macd_line": float(row.macd_line.iloc[0]),
-                        "signal_line": float(row.signal_line.iloc[0]),
-                        "histogram": float(row.histogram.iloc[0]),
-                        "date": str(index.date())
-                    }
-                    for index, row in last_three_rows.iterrows()
-                ]
+                data_to_save = []
+                for idx, row in last_three.iterrows():
+                    # Cast idx to Timestamp so .date() is recognized
+                    ts = cast(pd.Timestamp, idx)
+                    date_str = str(ts.date())
+                    data_to_save.append({
+                        "macd_line": float(row.macd_line),
+                        "signal_line": float(row.signal_line),
+                        "histogram": float(row.histogram),
+                        "date": date_str
+                    })
 
                 save_macd_to_redis(
                     ticker,
@@ -570,8 +575,8 @@ def main():
                 )
 
     print("\n✅ [INFO] Full scan complete.\n")
-    # --- THIS LINE IS MODIFIED ---
-    evaluate_all_tickers(send_notifications=True) 
+    evaluate_all_tickers(send_notifications=True)
+
 
 if __name__ == "__main__":
     main()
@@ -1270,15 +1275,14 @@ function RuleBuilder() {
                     <ul>{rules.map(rule => (
                         // ✅ CHANGED: Main list item now stacks vertically on mobile
                         <li key={rule.id} className={`border-b border-[var(--border-color)] p-4 flex flex-col sm:flex-row sm:justify-between sm:items-center hover:bg-[var(--bg-dark-primary)] transition-colors ${deletingId === rule.id ? 'opacity-50' : ''}`}>
-                            {/* IMPROVEMENT: Ensure rule name and signal stay on one line or wrap gracefully */}
-                            <div className="mb-2 sm:mb-0">
+                            {/* IMPROVEMENT: Ensure rule name and signal stack on mobile */}
+                            <div className="mb-2 sm:mb-0 flex flex-col items-start sm:flex-row sm:items-baseline sm:gap-2">
                                 <span className="font-bold text-lg text-white break-words">{rule.name}</span>
-                                <span className="ml-2 text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded whitespace-nowrap block sm:inline-block">{rule.signal}</span>
+                                <span className="text-sm font-mono bg-gray-700/50 text-gray-300 px-2 py-1 rounded whitespace-nowrap block sm:inline-block">{rule.signal}</span>
                             </div>
-                            {/* ✅ CHANGED: Action buttons now stack on mobile and have better spacing */}
-                            {/* IMPROVEMENT: Telegram toggle and action buttons stack on mobile, then go horizontal on small screens+ */}
-                            <div className="flex flex-col items-stretch gap-3 mt-4 sm:flex-row sm:items-center sm:gap-4 sm:mt-0">
-                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between sm:justify-start cursor-pointer flex-grow">
+                            {/* IMPROVEMENT: Telegram toggle and action buttons stack on mobile */}
+                            <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:gap-4 mt-4 sm:mt-0">
+                                <label htmlFor={`telegram-${rule.id}`} className="flex items-center justify-between cursor-pointer w-full sm:w-auto">
                                     <span className="mr-3 text-sm text-[var(--text-secondary)] whitespace-nowrap">Telegram Alert</span>
                                     <div className="relative">
                                         <input type="checkbox" id={`telegram-${rule.id}`} className="sr-only" checked={!!rule.telegram_enabled} onChange={() => handleTelegramToggle(rule)} disabled={deletingId === rule.id}/>
@@ -1286,9 +1290,8 @@ function RuleBuilder() {
                                         <div className="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full"></div>
                                     </div>
                                 </label>
-                                <button onClick={() => handleEditClick(rule)} className="text-center sm:text-left text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap" disabled={deletingId === rule.id}>Edit</button>
-                                {/* ✅ CHANGED: Removed fixed width 'w-24' for better flexibility */}
-                                <button onClick={() => handleDelete(rule.id)} className="text-center sm:text-left text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap" disabled={deletingId === rule.id}>
+                                <button onClick={() => handleEditClick(rule)} className="text-blue-400 hover:text-blue-300 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap w-full sm:w-auto">Edit</button>
+                                <button onClick={() => handleDelete(rule.id)} className="text-red-500 hover:text-red-400 font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap w-full sm:w-auto">
                                     {deletingId === rule.id ? 'Deleting...' : 'Delete'}
                                 </button>
                             </div>

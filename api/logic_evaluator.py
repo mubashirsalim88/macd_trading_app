@@ -1,27 +1,24 @@
 # api/logic_evaluator.py
 
-from src.redis_client import get_macd_from_redis
+from src.redis_client import get_macd_from_redis, r
 from src.config import CRYPTO_TICKERS
 from api.firestore_client import get_all_rules
 from api.notifications import send_telegram_message
 import json
-from src.redis_client import r # Import the redis client
 
 # --- THIS IS A NEW FUNCTION ---
 def save_signals_to_redis(signals):
-    """Saves the latest evaluated signals to a single key in Redis."""
     try:
-        r.set('latest_signals', json.dumps(signals))
+        r.set('latest_signals', json.dumps(signals))  # type: ignore
     except Exception as e:
         print(f"[REDIS ERROR] Failed to save latest signals: {e}")
 
 # --- THIS IS A NEW FUNCTION ---
 def get_signals_from_redis():
-    """Retrieves the latest signals from Redis."""
     try:
-        signals = r.get('latest_signals')
-        if signals:
-            return json.loads(signals.decode('utf-8'))
+        raw = r.get('latest_signals')  # type: ignore
+        if raw:
+            return json.loads(raw.decode('utf-8'))  # type: ignore
     except Exception as e:
         print(f"[REDIS ERROR] Failed to get latest signals: {e}")
     return {ticker: {"signal": "NO_SIGNAL", "rule_name": None} for ticker in CRYPTO_TICKERS}
